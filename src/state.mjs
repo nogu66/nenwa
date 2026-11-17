@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-export const HOME_DIR = process.env.MESHLINK_HOME || path.join(os.homedir(), ".meshlink");
+export const HOME_DIR = process.env.NENWA_HOME || path.join(os.homedir(), ".nenwa");
 export const SOCK = path.join(HOME_DIR, "sock");
 export const CONFIG = path.join(HOME_DIR, "config.json");
 export const OUTBOX = path.join(HOME_DIR, "outbox.json");
@@ -87,7 +87,7 @@ export async function request(req) {
   } catch (e) {
     if (!["ENOENT", "ECONNREFUSED"].includes(e.code)) throw e;
   }
-  if (!loadConfig()) throw new Error("まだチームがありません。meshlink init か meshlink join <招待> を先に実行してください");
+  if (!loadConfig()) throw new Error("まだチームがありません。nenwa init か nenwa join <招待> を先に実行してください");
   const log = fs.openSync(LOG, "a");
   spawn(process.execPath, [CLI, "daemon"], { detached: true, stdio: ["ignore", log, log], env: process.env }).unref();
   for (let i = 0; i < 50; i++) {

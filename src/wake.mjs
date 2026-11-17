@@ -1,5 +1,5 @@
 // 受信箱にメッセージが入ったとき、その持ち主（Grok Bot の routine など）を webhook で起こす。
-// 設定は ~/.meshlink/wake/<受信箱>.json に { url, key }。
+// 設定は ~/.nenwa/wake/<受信箱>.json に { url, key }。
 // 鍵が whsec_ で始まれば Standard Webhooks の署名、それ以外は Authorization: Bearer と X-Automation-Key で送る。
 import fs from "node:fs";
 import path from "node:path";

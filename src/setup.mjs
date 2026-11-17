@@ -1,19 +1,19 @@
-// Codex と Cursor の設定に meshlink の MCP サーバーとフックを足す（外す）。
-// 書き換える前に一度だけ <ファイル>.bak-meshlink を残す。ほかのフックや MCP サーバーには触らない。
+// Codex と Cursor の設定に nenwa の MCP サーバーとフックを足す（外す）。
+// 書き換える前に一度だけ <ファイル>.bak-nenwa を残す。ほかのフックや MCP サーバーには触らない。
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CLI, stableNode } from "./state.mjs";
 
-const codexDir = () => process.env.MESHLINK_CODEX_DIR || path.join(os.homedir(), ".codex");
-const cursorDir = () => process.env.MESHLINK_CURSOR_DIR || path.join(os.homedir(), ".cursor");
+const codexDir = () => process.env.NENWA_CODEX_DIR || path.join(os.homedir(), ".codex");
+const cursorDir = () => process.env.NENWA_CURSOR_DIR || path.join(os.homedir(), ".cursor");
 
 const q = (s) => `'${String(s).replaceAll("'", "'\\''")}'`;
 const hookCommand = (agent, event) => `${q(stableNode())} ${q(CLI)} hook ${agent} ${event}`;
 const isOurs = (h) => typeof h?.command === "string" && h.command.includes(`${q(CLI)} hook `);
 
 function backup(file) {
-  const bak = `${file}.bak-meshlink`;
+  const bak = `${file}.bak-nenwa`;
   if (fs.existsSync(file) && !fs.existsSync(bak)) fs.copyFileSync(file, bak);
 }
 
@@ -34,8 +34,8 @@ const CODEX_EVENTS = [
   ["Stop", "stop", {}, 10],
   ["SessionEnd", "session-end", {}, 3],
 ];
-const TOML_START = "# meshlink:start";
-const TOML_END = "# meshlink:end";
+const TOML_START = "# nenwa:start";
+const TOML_END = "# nenwa:end";
 
 function setupCodex(remove) {
   const dir = codexDir();
@@ -46,7 +46,7 @@ function setupCodex(remove) {
   const cleaned = text.replace(block, "\n").replace(/\n{3,}$/, "\n\n");
   const ours = remove
     ? ""
-    : `\n${TOML_START}\n[mcp_servers.meshlink]\ncommand = ${JSON.stringify(stableNode())}\nargs = ${JSON.stringify([CLI, "mcp", "--agent", "codex"])}\ntool_timeout_sec = 120\n${TOML_END}\n`;
+    : `\n${TOML_START}\n[mcp_servers.nenwa]\ncommand = ${JSON.stringify(stableNode())}\nargs = ${JSON.stringify([CLI, "mcp", "--agent", "codex"])}\ntool_timeout_sec = 120\n${TOML_END}\n`;
   const next = cleaned.replace(/\s*$/, "\n") + ours;
   if (next !== text) {
     backup(toml);
@@ -84,8 +84,8 @@ function setupCursor(remove) {
   const mcpFile = path.join(dir, "mcp.json");
   const mcp = readJson(mcpFile, { mcpServers: {} });
   mcp.mcpServers ||= {};
-  if (remove) delete mcp.mcpServers.meshlink;
-  else mcp.mcpServers.meshlink = { type: "stdio", command: stableNode(), args: [CLI, "mcp", "--agent", "cursor"] };
+  if (remove) delete mcp.mcpServers.nenwa;
+  else mcp.mcpServers.nenwa = { type: "stdio", command: stableNode(), args: [CLI, "mcp", "--agent", "cursor"] };
   backup(mcpFile);
   writeJson(mcpFile, mcp);
 

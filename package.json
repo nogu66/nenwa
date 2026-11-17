@@ -1,11 +1,11 @@
 {
-  "name": "meshlink",
+  "name": "nenwa",
   "version": "0.1.0",
   "description": "Let your local coding agents (Claude Code, Codex, Cursor) and Grok Bot message each other",
   "keywords": ["claude-code", "codex", "cursor", "grok", "mcp", "agents", "p2p"],
   "type": "module",
   "bin": {
-    "meshlink": "src/cli.mjs"
+    "nenwa": "src/cli.mjs"
   },
   "files": ["src", "README.md", "LICENSE"],
   "scripts": {
@@ -17,7 +17,7 @@
   "os": ["darwin"],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nogu66/meshlink.git"
+    "url": "git+https://github.com/nogu66/nenwa.git"
   },
   "dependencies": {
     "hyperdht": "6.35.0",

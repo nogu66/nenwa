@@ -23,11 +23,11 @@ const ACK_TIMEOUT = 10_000;
 const log = (...a) => console.error(new Date().toISOString(), ...a);
 const hex = (b) => Buffer.from(b).toString("hex");
 
-export const topicFor = (teamKey) => createHash("sha256").update("meshlink/topic/").update(Buffer.from(teamKey, "hex")).digest();
+export const topicFor = (teamKey) => createHash("sha256").update("nenwa/topic/").update(Buffer.from(teamKey, "hex")).digest();
 
 // 送る側は (自分の鍵, 相手の鍵)、受ける側は (相手の鍵, 自分の鍵) で同じ値になる。チーム鍵を知らないと作れない。
 export function helloMac(teamKey, fromPub, toPub) {
-  return createHmac("sha256", Buffer.from(teamKey, "hex")).update("meshlink/hello/").update(fromPub).update(toPub).digest("hex");
+  return createHmac("sha256", Buffer.from(teamKey, "hex")).update("nenwa/hello/").update(fromPub).update(toPub).digest("hex");
 }
 
 export function verifyHello(teamKey, hello, remotePub, localPub) {
@@ -43,7 +43,7 @@ const WAKE_RETRY = 10 * 60_000; // 起こしてもまだ読まれていない間
 
 export async function startDaemon() {
   const config = loadConfig();
-  if (!config) throw new Error("config.json がありません。meshlink init か join を先に");
+  if (!config) throw new Error("config.json がありません。nenwa init か join を先に");
   const { person, machine, teamKey, seed } = config;
   const me = { person, machine };
   const ownAddress = (label) => `${person}/${label}@${machine}`;
@@ -111,13 +111,13 @@ export async function startDaemon() {
     wakeState.set(name, { at: now, read: false });
     const address = ownAddress(name);
     const payload = {
-      source: "meshlink",
+      source: "nenwa",
       mailbox: address,
       unread: list.length,
       from: [...new Set(list.map((m) => m.from))],
       text:
-        `meshlink の受信箱（${address}）に新しいメッセージが ${list.length} 件あります。` +
-        `meshlink の check_inbox で読み、返事が要るものには send_message で reply_to を付けて返してください。` +
+        `nenwa の受信箱（${address}）に新しいメッセージが ${list.length} 件あります。` +
+        `nenwa の check_inbox で読み、返事が要るものには send_message で reply_to を付けて返してください。` +
         `MCP が使えないときは、下の commands をこのパソコンのローカル実行で使ってください。`,
       commands: {
         read: `${stableNode()} ${CLI} inbox --as ${name}`,
@@ -188,11 +188,11 @@ export async function startDaemon() {
     const list = liveAgents().filter((a) => a.agent === agent && a.status !== "offline");
     const score = (a) => (a.status === "busy" ? 2 : 0) + (cwd && a.cwd === cwd ? 1 : 0);
     list.sort((x, y) => score(y) - score(x) || y.seen - x.seen);
-    if (!list[0]) throw new Error(`この ${agent} のセッションがまだ meshlink に見えていません。meshlink install のあとに開いたセッションか、フックが信頼済みか（Codex は /hooks）を確かめてください`);
+    if (!list[0]) throw new Error(`この ${agent} のセッションがまだ nenwa に見えていません。nenwa install のあとに開いたセッションか、フックが信頼済みか（Codex は /hooks）を確かめてください`);
     return list[0];
   }
 
-  const codexBin = process.env.MESHLINK_CODEX_BIN || "codex";
+  const codexBin = process.env.NENWA_CODEX_BIN || "codex";
   async function deliverToAgent(a, msg) {
     if (a.agent === "codex") {
       // 待機中でも作業中でも、codex queue なら会話に入る（待機中ならそこで動き出す）。だめならフックで渡す。
@@ -214,7 +214,7 @@ export async function startDaemon() {
     // Cursor の beforeSubmitPrompt は会話に足せないので、メッセージは次の postToolUse か stop まで取っておく。
     const canInject = !(agent === "cursor" && event === "user-prompt-submit");
     const mail = canInject ? await takeInbox(a.label, 0, { register: false }) : [];
-    const intro = event === "session-start" ? `meshlink: このセッションの宛先は ${ownAddress(a.label)} です。` : "";
+    const intro = event === "session-start" ? `nenwa: このセッションの宛先は ${ownAddress(a.label)} です。` : "";
     const text = [intro, ...mail.map(frame)].filter(Boolean).join("\n\n");
     if (mail.length) log("hook", agent, event, a.label, mail.length);
     if (event === "stop" && mail.length) a.status = "busy";
@@ -261,7 +261,7 @@ export async function startDaemon() {
 
   // ---- P2P ----
   const opts = { keyPair: DHT.keyPair(Buffer.from(seed, "hex")) };
-  if (process.env.MESHLINK_BOOTSTRAP) opts.bootstrap = JSON.parse(process.env.MESHLINK_BOOTSTRAP);
+  if (process.env.NENWA_BOOTSTRAP) opts.bootstrap = JSON.parse(process.env.NENWA_BOOTSTRAP);
   // network: false（install が最初に作る形）のあいだは P2P につながない。このパソコンの中だけで動く。
   const network = config.network !== false;
   const swarm = network ? new Hyperswarm(opts) : null;
@@ -399,7 +399,7 @@ export async function startDaemon() {
   // ---- 内側の API ----
   async function send({ fromSession, as, agent: agentKind, cwd, to, body, reply_to }) {
     const target = parseAddress(to);
-    if (!target) throw new Error(`宛先は <人>/<セッション>@<マシン> の形で（例: alice/api@alice-mbp）。meshlink who で確認できます`);
+    if (!target) throw new Error(`宛先は <人>/<セッション>@<マシン> の形で（例: alice/api@alice-mbp）。nenwa who で確認できます`);
     if (typeof body !== "string" || !body.trim()) throw new Error("本文が空です");
     if (body.length > MAX_BODY) throw new Error(`本文は ${MAX_BODY} 文字まで`);
     // 送り主: Codex / Cursor のセッション > 受信箱の名前（Grok Bot など）> Claude Code のセッション > ターミナル
