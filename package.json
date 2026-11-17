@@ -2,19 +2,35 @@
   "name": "nenwa",
   "version": "0.1.0",
   "description": "Let your local coding agents (Claude Code, Codex, Cursor) and Grok Bot message each other",
-  "keywords": ["claude-code", "codex", "cursor", "grok", "mcp", "agents", "p2p"],
+  "keywords": [
+    "claude-code",
+    "codex",
+    "cursor",
+    "grok",
+    "mcp",
+    "agents",
+    "p2p"
+  ],
   "type": "module",
   "bin": {
-    "nenwa": "src/cli.mjs"
+    "nenwa": "dist/cli.js"
   },
-  "files": ["src", "README.md", "LICENSE"],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
-    "test": "node --test test/"
+    "build": "tsc",
+    "test": "npm run build && tsc -p test && node --test test/",
+    "prepublishOnly": "npm test"
   },
   "engines": {
     "node": ">=20"
   },
-  "os": ["darwin"],
+  "os": [
+    "darwin"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/nogu66/nenwa.git"
@@ -23,5 +39,9 @@
     "hyperdht": "6.35.0",
     "hyperswarm": "4.17.2"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "typescript": "7.0.2"
+  }
 }

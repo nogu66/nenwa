@@ -14,9 +14,28 @@ export const LOG = path.join(HOME_DIR, "daemon.log");
 export const INBOX_DIR = path.join(HOME_DIR, "inbox");
 export const MAILBOXES = path.join(HOME_DIR, "mailboxes.json");
 export const AGENTS = path.join(HOME_DIR, "agents.json");
-export const CLI = fileURLToPath(new URL("./cli.mjs", import.meta.url));
+// 動いている cli の場所。ビルドしたものは dist/cli.js、開発中に src から直接動かすときは src/cli.ts。
+const SELF = fileURLToPath(import.meta.url);
+export const CLI = path.join(path.dirname(SELF), `cli${path.extname(SELF)}`);
 
-export function loadConfig() {
+export interface Config {
+  person: string;
+  machine: string;
+  teamKey: string;
+  seed: string;
+  // false のあいだは P2P につながない。古い config.json には無い
+  network?: boolean;
+}
+
+// デーモンへの問い合わせと返事。問い合わせの中身は op ごとに違う。
+export type Request = { op: string } & Record<string, unknown>;
+export interface Reply {
+  ok: boolean;
+  result?: unknown;
+  error?: string;
+}
+
+export function loadConfig(): Config | null {
   try {
     return JSON.parse(fs.readFileSync(CONFIG, "utf8"));
   } catch {
@@ -24,13 +43,13 @@ export function loadConfig() {
   }
 }
 
-export function saveConfig(config) {
+export function saveConfig(config: Config): void {
   fs.mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(CONFIG, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
 }
 
 // 届いた断片を改行で区切り、1 行ずつ onLine に渡す。ソケットと stdin の両方で使う。
-export function lineReader(onLine, maxBytes = 1 << 20) {
+export function lineReader(onLine: (line: string) => void, maxBytes = 1 << 20): (chunk: string | Buffer) => void {
   let buf = "";
   return (chunk) => {
     buf += chunk;
@@ -44,7 +63,7 @@ export function lineReader(onLine, maxBytes = 1 << 20) {
   };
 }
 
-function once(req) {
+function once(req: Request): Promise<Reply> {
   return new Promise((resolve, reject) => {
     const c = net.createConnection(SOCK);
     c.setEncoding("utf8");
@@ -57,10 +76,10 @@ function once(req) {
   });
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // デーモンが動いていれば聞き、動いていなければ null（起動はしない）。
-export async function tryRequest(req) {
+export async function tryRequest(req: Request): Promise<Reply | null> {
   try {
     return await once(req);
   } catch {
@@ -70,7 +89,7 @@ export async function tryRequest(req) {
 
 // node の場所。Homebrew だと process.execPath がバージョン番号入り（.../Cellar/node/26.12.1_1/...）になり、
 // 更新すると消える。同じ node を指す、バージョン番号のない場所があればそちらを使う。
-export function stableNode() {
+export function stableNode(): string {
   const real = fs.realpathSync(process.execPath);
   for (const p of ["/opt/homebrew/bin/node", "/usr/local/bin/node"]) {
     try {
@@ -81,11 +100,11 @@ export function stableNode() {
 }
 
 // デーモンが動いていなければ裏で起動してから聞く。
-export async function request(req) {
+export async function request(req: Request): Promise<Reply> {
   try {
     return await once(req);
   } catch (e) {
-    if (!["ENOENT", "ECONNREFUSED"].includes(e.code)) throw e;
+    if (!["ENOENT", "ECONNREFUSED"].includes((e as NodeJS.ErrnoException).code ?? "")) throw e;
   }
   if (!loadConfig()) throw new Error("まだチームがありません。nenwa init か nenwa join <招待> を先に実行してください");
   const log = fs.openSync(LOG, "a");

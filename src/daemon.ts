@@ -1,36 +1,119 @@
 // パソコンに 1 つ常駐するデーモン。
 // - 外側: Hyperswarm（Noise で暗号化した P2P）。チーム鍵のハッシュを topic にして仲間を探し、HMAC で合言葉を確かめる。
 // - 内側: unix ソケット。CLI と MCP サーバーがここに who / send を聞きに来る。
-// - 配送: 宛先のセッションの受信ソケットに書く（claude.mjs の post）。相手がオフラインなら outbox に置いて、つながったら送る。
+// - 配送: 宛先のセッションの受信ソケットに書く（claude.ts の post）。相手がオフラインなら outbox に置いて、つながったら送る。
 // - 受信箱: Claude Code 以外（Grok Bot など）は、受信箱に貯めて check_inbox で読ませ、webhook で起こす。
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import Hyperswarm from "hyperswarm";
+import type { SwarmConnection, SwarmOptions } from "hyperswarm";
 import DHT from "hyperdht";
+import type { KeyPair } from "hyperdht";
 import { execFile } from "node:child_process";
-import { HOME_DIR, SOCK, OUTBOX, INBOX_DIR, MAILBOXES, AGENTS, CLI, loadConfig, lineReader, stableNode } from "./state.mjs";
-import { claudeSessions, post } from "./claude.mjs";
-import { wake } from "./wake.mjs";
-import { frame, parseAddress, MAILBOX_NAME } from "./message.mjs";
+import { HOME_DIR, SOCK, OUTBOX, INBOX_DIR, MAILBOXES, AGENTS, CLI, loadConfig, lineReader, stableNode, type Reply } from "./state.ts";
+import { claudeSessions, post } from "./claude.ts";
+import { wake } from "./wake.ts";
+import { frame, parseAddress, MAILBOX_NAME, type Message } from "./message.ts";
 
 const MAX_BODY = 16 * 1024;
 const MAX_DEPTH = 10; // 人の入力なしにエージェント同士が続けて返事できる回数
 const RATE_PER_MIN = 20; // 1 人の送り主から 1 分に受け取る数
 const ACK_TIMEOUT = 10_000;
 
-const log = (...a) => console.error(new Date().toISOString(), ...a);
-const hex = (b) => Buffer.from(b).toString("hex");
+const log = (...a: unknown[]) => console.error(new Date().toISOString(), ...a);
+const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 
-export const topicFor = (teamKey) => createHash("sha256").update("nenwa/topic/").update(Buffer.from(teamKey, "hex")).digest();
+// 配送の結果
+export type DeliveryState = "delivered" | "inbox" | "no_session" | "refused" | "rate_limited";
+
+// 一覧に出す 1 件（自分のセッションも、仲間から届いた分も）
+export interface Presence {
+  address: string;
+  title: string;
+  status: string;
+}
+
+export interface Who {
+  me: { person: string; machine: string };
+  network: boolean;
+  local: Presence[];
+  peers: { person: string; machine: string; online: boolean; lastSeen: string; sessions: Presence[] }[];
+  outbox: number;
+}
+
+interface Peer {
+  person: string;
+  machine: string;
+  conn: SwarmConnection;
+  online: boolean;
+  lastSeen: number;
+  sessions: Presence[];
+}
+
+// 仲間から届く 1 行。中身は信用できないので、使う前に形を確かめる。
+interface WireMessage {
+  t: string;
+  id: string;
+  state: DeliveryState;
+  from: string;
+  to: string;
+  body: unknown;
+  reply_to?: string | null;
+  sent_at: string;
+  depth?: unknown;
+  sessions?: unknown;
+  person?: unknown;
+  machine?: unknown;
+  mac?: unknown;
+}
+
+// フックでつながるエージェント（Codex、Cursor）の会話
+interface Agent {
+  agent: string;
+  id: string;
+  cwd: string;
+  label: string;
+  status: string;
+  seen: number;
+}
+
+// フックに渡される JSON（使う項目だけ）
+interface HookInput {
+  session_id?: string;
+  conversation_id?: string;
+  cwd?: string;
+  workspace_roots?: string[];
+}
+
+interface SendRequest {
+  fromSession?: string | null;
+  as?: string;
+  agent?: string;
+  cwd?: string;
+  to?: unknown;
+  body?: unknown;
+  reply_to?: string | null;
+}
+
+// CLI と MCP サーバーから届く問い合わせ。op ごとに使う項目が違う。
+interface DaemonRequest extends SendRequest {
+  op: string;
+  name: string;
+  wait?: unknown;
+  event: string;
+  input: HookInput;
+}
+
+export const topicFor = (teamKey: string) => createHash("sha256").update("nenwa/topic/").update(Buffer.from(teamKey, "hex")).digest();
 
 // 送る側は (自分の鍵, 相手の鍵)、受ける側は (相手の鍵, 自分の鍵) で同じ値になる。チーム鍵を知らないと作れない。
-export function helloMac(teamKey, fromPub, toPub) {
+export function helloMac(teamKey: string, fromPub: Uint8Array, toPub: Uint8Array): string {
   return createHmac("sha256", Buffer.from(teamKey, "hex")).update("nenwa/hello/").update(fromPub).update(toPub).digest("hex");
 }
 
-export function verifyHello(teamKey, hello, remotePub, localPub) {
+export function verifyHello(teamKey: string, hello: { mac?: unknown } | null | undefined, remotePub: Uint8Array, localPub: Uint8Array): boolean {
   if (typeof hello?.mac !== "string" || !/^[0-9a-f]{64}$/.test(hello.mac)) return false;
   const want = Buffer.from(helloMac(teamKey, remotePub, localPub), "hex");
   return timingSafeEqual(want, Buffer.from(hello.mac, "hex"));
@@ -46,48 +129,48 @@ export async function startDaemon() {
   if (!config) throw new Error("config.json がありません。nenwa init か join を先に");
   const { person, machine, teamKey, seed } = config;
   const me = { person, machine };
-  const ownAddress = (label) => `${person}/${label}@${machine}`;
+  const ownAddress = (label: string) => `${person}/${label}@${machine}`;
 
   // ---- 状態 ----
-  const peers = new Map(); // 相手の公開鍵 hex → { person, machine, conn, online, lastSeen, sessions }
-  const pendingAcks = new Map(); // メッセージ id → resolve
-  const depths = new Map(); // メッセージ id → 何往復目か（暴走よけ）
-  const seen = new Map(); // 受け取ったメッセージ id → 時刻（再送の重複よけ）
-  const rate = new Map(); // 送り主 → 直近 1 分の受信時刻
-  let outbox = [];
+  const peers = new Map<string, Peer>(); // 相手の公開鍵 hex → { person, machine, conn, online, lastSeen, sessions }
+  const pendingAcks = new Map<string, (state: DeliveryState) => void>(); // メッセージ id → resolve
+  const depths = new Map<string, number>(); // メッセージ id → 何往復目か（暴走よけ）
+  const seen = new Map<string, number>(); // 受け取ったメッセージ id → 時刻（再送の重複よけ）
+  const rate = new Map<string, number[]>(); // 送り主 → 直近 1 分の受信時刻
+  let outbox: Message[] = [];
   try {
     outbox = JSON.parse(fs.readFileSync(OUTBOX, "utf8"));
   } catch {}
   const saveOutbox = () => fs.writeFileSync(OUTBOX, JSON.stringify(outbox, null, 2), { mode: 0o600 });
 
-  const remember = (map, key, value) => {
+  const remember = <K, V>(map: Map<K, V>, key: K, value: V) => {
     map.set(key, value);
-    if (map.size > 5000) map.delete(map.keys().next().value);
+    if (map.size > 5000) map.delete(map.keys().next().value!);
   };
 
   // ---- 受信箱（Claude Code 以外の相手。terminal はいつもある） ----
   // 受信箱を作れるのはこのパソコンの中からだけ（register / send --as / check_inbox）。外からは作れない。
-  let mailboxes = {};
+  let mailboxes: Record<string, { created: string }> = {};
   try {
     mailboxes = JSON.parse(fs.readFileSync(MAILBOXES, "utf8"));
   } catch {}
   mailboxes.terminal ||= { created: new Date().toISOString() };
-  const waiters = new Map(); // 受信箱 → check_inbox で待っている resolve の集まり
-  const wakeState = new Map(); // 受信箱 → { at: 最後に起こした時刻 }
-  const inboxFile = (name) => path.join(INBOX_DIR, `${name}.json`);
-  const readInbox = (name) => {
+  const waiters = new Map<string, Set<() => void>>(); // 受信箱 → check_inbox で待っている resolve の集まり
+  const wakeState = new Map<string, { at: number; read: boolean }>(); // 受信箱 → { at: 最後に起こした時刻 }
+  const inboxFile = (name: string) => path.join(INBOX_DIR, `${name}.json`);
+  const readInbox = (name: string): Message[] => {
     try {
       return JSON.parse(fs.readFileSync(inboxFile(name), "utf8"));
     } catch {
       return [];
     }
   };
-  const writeInbox = (name, list) => {
+  const writeInbox = (name: string, list: Message[]) => {
     fs.mkdirSync(INBOX_DIR, { recursive: true, mode: 0o700 });
     fs.writeFileSync(inboxFile(name), JSON.stringify(list, null, 2), { mode: 0o600 });
   };
 
-  function registerMailbox(name) {
+  function registerMailbox(name: string) {
     if (!MAILBOX_NAME.test(name || "")) throw new Error("受信箱の名前は英小文字・数字・. _ - で 40 文字まで（例: grok）");
     if (mailboxes[name]) return;
     mailboxes[name] = { created: new Date().toISOString() };
@@ -95,7 +178,7 @@ export async function startDaemon() {
     log("mailbox", name);
   }
 
-  function storeInInbox(name, msg) {
+  function storeInInbox(name: string, msg: Message) {
     const list = readInbox(name);
     list.push(msg);
     writeInbox(name, list.slice(-500));
@@ -104,7 +187,7 @@ export async function startDaemon() {
     maybeWake(name, list);
   }
 
-  function maybeWake(name, list) {
+  function maybeWake(name: string, list: Message[]) {
     const now = Date.now();
     const last = wakeState.get(name);
     if (last && !last.read && now - last.at < WAKE_RETRY) return;
@@ -130,12 +213,12 @@ export async function startDaemon() {
       .catch((e) => log("wake failed", name, e.message));
   }
 
-  async function takeInbox(name, wait, { register = true } = {}) {
+  async function takeInbox(name: string, wait: unknown, { register = true } = {}) {
     if (register) registerMailbox(name);
     let list = readInbox(name);
     const secs = Math.min(Math.max(Number(wait) || 0, 0), MAX_WAIT);
     if (!list.length && secs) {
-      await new Promise((resolve) => {
+      await new Promise<void>((resolve) => {
         const set = waiters.get(name) || new Set();
         const done = () => {
           clearTimeout(timer);
@@ -157,24 +240,25 @@ export async function startDaemon() {
 
   // ---- フックでつながるエージェント（Codex、Cursor） ----
   // フックが呼ばれるたびにセッションを覚える。1 日見えなければ忘れる。
-  let agents = {};
+  let agents: Record<string, Agent> = {};
   try {
     agents = JSON.parse(fs.readFileSync(AGENTS, "utf8"));
   } catch {}
   const DAY = 24 * 3600_000;
   const saveAgents = () => fs.writeFileSync(AGENTS, JSON.stringify(agents, null, 2), { mode: 0o600 });
   const liveAgents = () => Object.values(agents).filter((a) => Date.now() - a.seen < DAY);
-  const agentByLabel = (label) => liveAgents().find((a) => a.label === label);
-  const slugOf = (s) => String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "session";
+  const agentByLabel = (label: string) => liveAgents().find((a) => a.label === label);
+  const slugOf = (s: string) => String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40) || "session";
 
-  function touchAgent(agent, input, status) {
+  function touchAgent(agent: string, input: HookInput, status: string) {
     const id = String(input?.session_id || input?.conversation_id || "");
     if (!id) return null;
     const key = `${agent}:${id}`;
     const cwd = input.cwd || input.workspace_roots?.[0] || "";
     // Codex の ID は先頭が時刻なので、ばらつく末尾の 4 文字を使う。
     const tail = id.replace(/[^a-z0-9]/gi, "").slice(-4).toLowerCase();
-    const a = (agents[key] ||= { agent, id, cwd, label: `${slugOf(path.basename(cwd))}-${tail}` });
+    // status と seen はすぐ下で入れる
+    const a = (agents[key] ||= { agent, id, cwd, label: `${slugOf(path.basename(cwd))}-${tail}` } as Agent);
     a.status = status;
     a.seen = Date.now();
     if (!a.cwd && cwd) a.cwd = cwd;
@@ -184,19 +268,19 @@ export async function startDaemon() {
   }
 
   // MCP サーバーはどの会話から呼ばれたかを知らない。作業中（ツールを呼べるのは作業中）で、フォルダが合い、最近動いたものを選ぶ。
-  function resolveAgent(agent, cwd) {
+  function resolveAgent(agent: string, cwd?: string) {
     const list = liveAgents().filter((a) => a.agent === agent && a.status !== "offline");
-    const score = (a) => (a.status === "busy" ? 2 : 0) + (cwd && a.cwd === cwd ? 1 : 0);
+    const score = (a: Agent) => (a.status === "busy" ? 2 : 0) + (cwd && a.cwd === cwd ? 1 : 0);
     list.sort((x, y) => score(y) - score(x) || y.seen - x.seen);
     if (!list[0]) throw new Error(`この ${agent} のセッションがまだ nenwa に見えていません。nenwa install のあとに開いたセッションか、フックが信頼済みか（Codex は /hooks）を確かめてください`);
     return list[0];
   }
 
   const codexBin = process.env.NENWA_CODEX_BIN || "codex";
-  async function deliverToAgent(a, msg) {
+  async function deliverToAgent(a: Agent, msg: Message): Promise<DeliveryState> {
     if (a.agent === "codex") {
       // 待機中でも作業中でも、codex queue なら会話に入る（待機中ならそこで動き出す）。だめならフックで渡す。
-      const ok = await new Promise((resolve) =>
+      const ok = await new Promise<boolean>((resolve) =>
         execFile(codexBin, ["queue", "--thread", a.id, "--message", frame(msg)], { timeout: 20_000 }, (err) => resolve(!err)),
       );
       if (ok) return "delivered";
@@ -206,9 +290,9 @@ export async function startDaemon() {
   }
 
   // フックの出力。届いているメッセージがあれば、そのエージェントのやり方で会話に差し込む。
-  async function hookEvent({ agent, event, input }) {
-    if (!["codex", "cursor"].includes(agent)) throw new Error(`unknown agent: ${agent}`);
-    const status = { "session-start": "idle", stop: "idle", "session-end": "offline" }[event] || "busy";
+  async function hookEvent({ agent, event, input }: { agent?: string; event: string; input: HookInput }) {
+    if (!agent || !["codex", "cursor"].includes(agent)) throw new Error(`unknown agent: ${agent}`);
+    const status = ({ "session-start": "idle", stop: "idle", "session-end": "offline" } as Record<string, string>)[event] || "busy";
     const a = touchAgent(agent, input, status);
     if (!a || event === "session-end") return null;
     // Cursor の beforeSubmitPrompt は会話に足せないので、メッセージは次の postToolUse か stop まで取っておく。
@@ -221,7 +305,7 @@ export async function startDaemon() {
     if (!text) return agent === "cursor" && event === "user-prompt-submit" ? { continue: true } : null;
     if (agent === "codex") {
       if (event === "stop") return { decision: "block", reason: text };
-      const hookEventName = { "session-start": "SessionStart", "user-prompt-submit": "UserPromptSubmit", "post-tool-use": "PostToolUse" }[event];
+      const hookEventName = ({ "session-start": "SessionStart", "user-prompt-submit": "UserPromptSubmit", "post-tool-use": "PostToolUse" } as Record<string, string>)[event];
       return { hookSpecificOutput: { hookEventName, additionalContext: text } };
     }
     if (event === "stop") return { followup_message: text };
@@ -229,7 +313,7 @@ export async function startDaemon() {
   }
 
   // ---- 自分のセッション ----
-  const presenceOf = () => [
+  const presenceOf = (): Presence[] => [
     ...claudeSessions().map((s) => ({ address: ownAddress(s.label), title: s.name || "", status: s.status || "" })),
     ...liveAgents()
       .filter((a) => a.status !== "offline")
@@ -240,8 +324,9 @@ export async function startDaemon() {
   ];
   let lastPresence = JSON.stringify(presenceOf());
 
-  async function deliverLocal(msg) {
-    const to = parseAddress(msg.to);
+  async function deliverLocal(msg: Message): Promise<DeliveryState> {
+    // msg.to はいつも正しい形（受け取るときと送るときに確かめてある）
+    const to = parseAddress(msg.to)!;
     const s = claudeSessions().find((x) => x.label === to.label);
     if (!s) {
       const a = agentByLabel(to.label);
@@ -254,27 +339,27 @@ export async function startDaemon() {
       await post(s.messagingSocketPath, frame(msg));
       return "delivered";
     } catch (e) {
-      log("deliver failed", msg.to, e.message);
+      log("deliver failed", msg.to, (e as Error).message);
       return "no_session";
     }
   }
 
   // ---- P2P ----
-  const opts = { keyPair: DHT.keyPair(Buffer.from(seed, "hex")) };
+  const opts: { keyPair: KeyPair; bootstrap?: SwarmOptions["bootstrap"] } = { keyPair: DHT.keyPair(Buffer.from(seed, "hex")) };
   if (process.env.NENWA_BOOTSTRAP) opts.bootstrap = JSON.parse(process.env.NENWA_BOOTSTRAP);
   // network: false（install が最初に作る形）のあいだは P2P につながない。このパソコンの中だけで動く。
   const network = config.network !== false;
   const swarm = network ? new Hyperswarm(opts) : null;
 
-  const sendTo = (conn, obj) => conn.write(JSON.stringify(obj) + "\n");
+  const sendTo = (conn: SwarmConnection, obj: object) => conn.write(JSON.stringify(obj) + "\n");
 
-  function peerFor(p, m) {
+  function peerFor(p: string, m: string) {
     for (const peer of peers.values()) if (peer.online && peer.person === p && peer.machine === m) return peer;
     return null;
   }
 
-  function transmit(peer, msg) {
-    return new Promise((resolve) => {
+  function transmit(peer: Peer, msg: Message) {
+    return new Promise<DeliveryState | null>((resolve) => {
       const timer = setTimeout(() => {
         pendingAcks.delete(msg.id);
         resolve(null);
@@ -288,9 +373,9 @@ export async function startDaemon() {
     });
   }
 
-  async function flushOutbox(peer) {
+  async function flushOutbox(peer: Peer) {
     for (const item of [...outbox]) {
-      const to = parseAddress(item.to);
+      const to = parseAddress(item.to)!;
       if (to.person !== peer.person || to.machine !== peer.machine) continue;
       const state = await transmit(peer, item);
       if (state === null) return; // 返事がなければ次につながったときにまた送る
@@ -300,7 +385,7 @@ export async function startDaemon() {
     }
   }
 
-  function allowed(from) {
+  function allowed(from: string) {
     const now = Date.now();
     const recent = (rate.get(from) || []).filter((t) => now - t < 60_000);
     recent.push(now);
@@ -308,14 +393,14 @@ export async function startDaemon() {
     return recent.length <= RATE_PER_MIN;
   }
 
-  async function onPeerMessage(peer, m) {
+  async function onPeerMessage(peer: Peer, m: WireMessage) {
     if (m.t === "presence") {
       peer.sessions = Array.isArray(m.sessions) ? m.sessions.slice(0, 100) : [];
       return;
     }
     if (m.t === "ack") return pendingAcks.get(m.id)?.(m.state);
     if (m.t !== "msg") return;
-    const ack = (state) => sendTo(peer.conn, { t: "ack", id: m.id, state });
+    const ack = (state: DeliveryState) => sendTo(peer.conn, { t: "ack", id: m.id, state });
     const from = parseAddress(m.from);
     const to = parseAddress(m.to);
     // パソコンは自分の人の名前でしか送れない。
@@ -324,7 +409,7 @@ export async function startDaemon() {
     if (typeof m.body !== "string" || m.body.length > MAX_BODY) return ack("refused");
     if (seen.has(m.id)) return ack("delivered");
     if (!allowed(m.from)) return ack("rate_limited");
-    const msg = { id: m.id, from: m.from, to: m.to, reply_to: m.reply_to || null, body: m.body, sent_at: m.sent_at, depth: Number(m.depth) || 0 };
+    const msg: Message = { id: m.id, from: m.from, to: m.to, reply_to: m.reply_to || null, body: m.body, sent_at: m.sent_at, depth: Number(m.depth) || 0 };
     const state = await deliverLocal(msg);
     if (state === "delivered" || state === "inbox") {
       remember(seen, m.id, Date.now());
@@ -336,13 +421,13 @@ export async function startDaemon() {
 
   swarm?.on("connection", (conn) => {
     const key = hex(conn.remotePublicKey);
-    let peer = null;
+    let peer: Peer | null = null;
     conn.setEncoding?.("utf8");
     conn.on("error", () => {});
     const timer = setTimeout(() => peer || conn.destroy(), 10_000);
     sendTo(conn, { t: "hello", person, machine, mac: helloMac(teamKey, conn.publicKey, conn.remotePublicKey) });
     const read = lineReader((line) => {
-      let m;
+      let m: WireMessage;
       try {
         m = JSON.parse(line);
       } catch {
@@ -354,8 +439,7 @@ export async function startDaemon() {
           return conn.destroy();
         }
         clearTimeout(timer);
-        peer = peers.get(key) || { sessions: [] };
-        Object.assign(peer, { person: String(m.person), machine: String(m.machine), conn, online: true, lastSeen: Date.now() });
+        peer = Object.assign(peers.get(key) || { sessions: [] }, { person: String(m.person), machine: String(m.machine), conn, online: true, lastSeen: Date.now() });
         peers.set(key, peer);
         log("peer up", `${peer.person}@${peer.machine}`);
         sendTo(conn, { t: "presence", sessions: JSON.parse(lastPresence) });
@@ -397,7 +481,7 @@ export async function startDaemon() {
   }, 2000);
 
   // ---- 内側の API ----
-  async function send({ fromSession, as, agent: agentKind, cwd, to, body, reply_to }) {
+  async function send({ fromSession, as, agent: agentKind, cwd, to, body, reply_to }: SendRequest) {
     const target = parseAddress(to);
     if (!target) throw new Error(`宛先は <人>/<セッション>@<マシン> の形で（例: alice/api@alice-mbp）。nenwa who で確認できます`);
     if (typeof body !== "string" || !body.trim()) throw new Error("本文が空です");
@@ -409,9 +493,9 @@ export async function startDaemon() {
     const from = hooked ? ownAddress(hooked.label) : as ? ownAddress(as) : own ? ownAddress(own.label) : ownAddress("terminal");
     const agent = hooked ? true : as ? as !== "terminal" : Boolean(own);
     // 人（ターミナル）から送ると数え直し。エージェントの返事は 1 つ増える。
-    const depth = agent ? (reply_to && depths.has(reply_to) ? depths.get(reply_to) + 1 : 0) : 0;
+    const depth = agent ? (reply_to && depths.has(reply_to) ? depths.get(reply_to)! + 1 : 0) : 0;
     if (depth >= MAX_DEPTH) throw new Error(`人の入力なしのやり取りが ${MAX_DEPTH} 回続いたので止めました。続けるならユーザーに確認してください`);
-    const msg = { id: randomUUID(), from, to: `${target.person}/${target.label}@${target.machine}`, reply_to: reply_to || null, body, sent_at: new Date().toISOString(), depth };
+    const msg: Message = { id: randomUUID(), from, to: `${target.person}/${target.label}@${target.machine}`, reply_to: reply_to || null, body, sent_at: new Date().toISOString(), depth };
     remember(depths, msg.id, depth);
     if (target.person === person && target.machine === machine) {
       const state = await deliverLocal(msg);
@@ -425,7 +509,7 @@ export async function startDaemon() {
     return { id: msg.id, from, state: "queued", note: `${target.person}@${target.machine} がつながったら送ります` };
   }
 
-  function who() {
+  function who(): Who {
     return {
       me,
       network,
@@ -443,7 +527,7 @@ export async function startDaemon() {
 
   // 前のデーモンが残したソケットは、つながらなければ消す。
   if (fs.existsSync(SOCK)) {
-    const busy = await new Promise((r) => {
+    const busy = await new Promise<boolean>((r) => {
       const c = net.createConnection(SOCK, () => (c.end(), r(true)));
       c.on("error", () => r(false));
     });
@@ -455,9 +539,9 @@ export async function startDaemon() {
     c.setEncoding("utf8");
     c.on("error", () => {});
     c.on("data", lineReader(async (line) => {
-      let res;
+      let res: Reply;
       try {
-        const req = JSON.parse(line);
+        const req: DaemonRequest = JSON.parse(line);
         if (req.op === "who") res = { ok: true, result: who() };
         else if (req.op === "send") res = { ok: true, result: await send(req) };
         else if (req.op === "shutdown") {
@@ -472,12 +556,12 @@ export async function startDaemon() {
         else if (req.op === "hook") res = { ok: true, result: await hookEvent(req) };
         else res = { ok: false, error: `unknown op: ${req.op}` };
       } catch (e) {
-        res = { ok: false, error: e.message };
+        res = { ok: false, error: (e as Error).message };
       }
       c.end(JSON.stringify(res) + "\n");
     }));
   });
-  await new Promise((r) => server.listen(SOCK, r));
+  await new Promise<void>((r) => server.listen(SOCK, r));
   fs.chmodSync(SOCK, 0o600);
   log("daemon up", `${person}@${machine}`, network ? `p2p key ${hex(opts.keyPair.publicKey).slice(0, 8)}` : "local only");
 
@@ -491,6 +575,6 @@ export async function startDaemon() {
     await discovery?.destroy().catch(() => {});
     await swarm?.destroy();
   };
-  for (const sig of ["SIGINT", "SIGTERM"]) process.once(sig, () => stop().then(() => process.exit(0)));
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => stop().then(() => process.exit(0)));
   return { stop, swarm };
 }

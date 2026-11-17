@@ -3,31 +3,51 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { CLI, stableNode } from "./state.mjs";
+import { CLI, stableNode } from "./state.ts";
 
 const codexDir = () => process.env.NENWA_CODEX_DIR || path.join(os.homedir(), ".codex");
 const cursorDir = () => process.env.NENWA_CURSOR_DIR || path.join(os.homedir(), ".cursor");
 
-const q = (s) => `'${String(s).replaceAll("'", "'\\''")}'`;
-const hookCommand = (agent, event) => `${q(stableNode())} ${q(CLI)} hook ${agent} ${event}`;
-const isOurs = (h) => typeof h?.command === "string" && h.command.includes(`${q(CLI)} hook `);
+const q = (s: string) => `'${String(s).replaceAll("'", "'\\''")}'`;
+const hookCommand = (agent: string, event: string) => `${q(stableNode())} ${q(CLI)} hook ${agent} ${event}`;
+// パスでは見分けない。フォルダを移したときや、手元の版から npm i -g の版に替えたときに、
+// 古い場所を指すフックが残って重なってしまうため。
+const OUR_HOOK = /[\\/]cli\.(?:mjs|js|ts)' hook (?:codex|cursor) /;
+const isOurs = (h: HookEntry | undefined) => typeof h?.command === "string" && OUR_HOOK.test(h.command);
 
-function backup(file) {
+// フックの設定の 1 件（Codex と Cursor で形がほぼ同じ。使う項目だけ）
+interface HookEntry {
+  type?: string;
+  command?: string;
+  timeout?: number;
+  matcher?: string;
+}
+interface HookGroup {
+  matcher?: string;
+  hooks?: HookEntry[];
+}
+
+export interface SetupResult {
+  agent: string;
+  files: string[];
+}
+
+function backup(file: string) {
   const bak = `${file}.bak-nenwa`;
   if (fs.existsSync(file) && !fs.existsSync(bak)) fs.copyFileSync(file, bak);
 }
 
-const readJson = (file, fallback) => {
+const readJson = <T>(file: string, fallback: T): T => {
   try {
     return JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return fallback;
   }
 };
-const writeJson = (file, data) => fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n");
+const writeJson = (file: string, data: unknown) => fs.writeFileSync(file, JSON.stringify(data, null, 2) + "\n");
 
 // ---- Codex ----
-const CODEX_EVENTS = [
+const CODEX_EVENTS: [string, string, Record<string, string>, number][] = [
   ["SessionStart", "session-start", { matcher: "*" }, 10],
   ["UserPromptSubmit", "user-prompt-submit", {}, 10],
   ["PostToolUse", "post-tool-use", { matcher: "*" }, 10],
@@ -37,7 +57,7 @@ const CODEX_EVENTS = [
 const TOML_START = "# nenwa:start";
 const TOML_END = "# nenwa:end";
 
-function setupCodex(remove) {
+function setupCodex(remove: boolean): SetupResult | null {
   const dir = codexDir();
   if (!fs.existsSync(dir)) return null;
   const toml = path.join(dir, "config.toml");
@@ -54,7 +74,7 @@ function setupCodex(remove) {
   }
 
   const hooksFile = path.join(dir, "hooks.json");
-  const data = readJson(hooksFile, { hooks: {} });
+  const data = readJson<{ hooks: Record<string, HookGroup[]> }>(hooksFile, { hooks: {} });
   data.hooks ||= {};
   for (const [event, name, extra, timeout] of CODEX_EVENTS) {
     const groups = (data.hooks[event] || [])
@@ -70,7 +90,7 @@ function setupCodex(remove) {
 }
 
 // ---- Cursor ----
-const CURSOR_EVENTS = [
+const CURSOR_EVENTS: [string, string, Record<string, string>][] = [
   ["sessionStart", "session-start", {}],
   ["beforeSubmitPrompt", "user-prompt-submit", {}],
   ["postToolUse", "post-tool-use", { matcher: "*" }],
@@ -78,11 +98,11 @@ const CURSOR_EVENTS = [
   ["sessionEnd", "session-end", {}],
 ];
 
-function setupCursor(remove) {
+function setupCursor(remove: boolean): SetupResult | null {
   const dir = cursorDir();
   if (!fs.existsSync(dir)) return null;
   const mcpFile = path.join(dir, "mcp.json");
-  const mcp = readJson(mcpFile, { mcpServers: {} });
+  const mcp = readJson<{ mcpServers: Record<string, unknown> }>(mcpFile, { mcpServers: {} });
   mcp.mcpServers ||= {};
   if (remove) delete mcp.mcpServers.nenwa;
   else mcp.mcpServers.nenwa = { type: "stdio", command: stableNode(), args: [CLI, "mcp", "--agent", "cursor"] };
@@ -90,7 +110,7 @@ function setupCursor(remove) {
   writeJson(mcpFile, mcp);
 
   const hooksFile = path.join(dir, "hooks.json");
-  const data = readJson(hooksFile, { version: 1, hooks: {} });
+  const data = readJson<{ version: number; hooks: Record<string, HookEntry[]> }>(hooksFile, { version: 1, hooks: {} });
   data.version ||= 1;
   data.hooks ||= {};
   for (const [event, name, extra] of CURSOR_EVENTS) {
@@ -104,6 +124,6 @@ function setupCursor(remove) {
   return { agent: "cursor", files: [mcpFile, hooksFile] };
 }
 
-export function setupAgents({ remove = false } = {}) {
-  return [setupCodex(remove), setupCursor(remove)].filter(Boolean);
+export function setupAgents({ remove = false }: { remove?: boolean } = {}): SetupResult[] {
+  return [setupCodex(remove), setupCursor(remove)].filter((r): r is SetupResult => Boolean(r));
 }

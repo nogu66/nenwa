@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { CLI, HOME_DIR, LOG, SOCK, loadConfig, saveConfig, request, tryRequest, stableNode } from "./state.mjs";
+import { CLI, HOME_DIR, LOG, SOCK, loadConfig, saveConfig, request, tryRequest, stableNode, type Config, type Request } from "./state.ts";
+import type { Who } from "./daemon.ts";
 
 const USAGE = `使い方（はじめては npx nenwa の 1 行で、導入から登録まで済む）:
   nenwa install                                  これだけで使える: 自動起動と、Claude Code・Codex・Cursor への登録
@@ -28,18 +29,18 @@ const USAGE = `使い方（はじめては npx nenwa の 1 行で、導入から
   nenwa setup [--remove]                         Codex と Cursor への登録だけをやり直す（外す）
   nenwa uninstall                                自動起動と各エージェントへの登録を外す（チームと受信箱は残す）`;
 
-const flag = (args, name, fallback) => {
+const flag = <T = undefined>(args: string[], name: string, fallback?: T): string | T => {
   const i = args.indexOf(`--${name}`);
-  return i >= 0 && args[i + 1] ? args.splice(i, 2)[1] : fallback;
+  return i >= 0 && args[i + 1] ? args.splice(i, 2)[1] : (fallback as T);
 };
-const clean = (s) => String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
-const defaults = (args) => ({
+const clean = (s: string) => String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const defaults = (args: string[]) => ({
   person: clean(flag(args, "person", os.userInfo().username)),
   machine: clean(flag(args, "machine", os.hostname().split(".")[0])),
 });
 
 // network: false のあいだは P2P につながず、このパソコンの中だけで動く（公開の DHT にも出ない）。
-function setup(args, teamKey, network) {
+function setup(args: string[], teamKey: string, network: boolean): Config {
   const old = loadConfig();
   // マシンの鍵（seed）は作り直さない。ネットワークを変えても同じパソコンとして見える。
   const config = { ...defaults(args), teamKey, seed: old?.seed || randomBytes(32).toString("hex"), network };
@@ -47,17 +48,17 @@ function setup(args, teamKey, network) {
   return config;
 }
 
-const PKG = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+const PKG: { name: string; version: string } = JSON.parse(fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"));
 const FROM_NPX = /[\\/]_npx[\\/]/.test(CLI);
-const inviteLine = (c) => `npx ${PKG.name} join ${Buffer.from(c.teamKey, "hex").toString("base64url")}`;
+const inviteLine = (c: Config) => `npx ${PKG.name} join ${Buffer.from(c.teamKey, "hex").toString("base64url")}`;
 
 // npx の一時フォルダから登録すると、そのフォルダが消えたときに動かなくなる。
 // なので npx から呼ばれたら、本体をこのパソコンに入れて、入れたほうで同じコマンドをやり直す。
-function relaunchGlobal(args) {
+function relaunchGlobal(args: string[]) {
   console.log(`${PKG.name} をこのパソコンに入れています…`);
   execFileSync("npm", ["i", "-g", `${PKG.name}@${PKG.version}`], { stdio: "inherit" });
   const root = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
-  execFileSync(process.execPath, [path.join(root, PKG.name, "src", "cli.mjs"), ...args], { stdio: "inherit" });
+  execFileSync(process.execPath, [path.join(root, PKG.name, "dist", "cli.js"), ...args], { stdio: "inherit" });
 }
 
 async function main() {
@@ -87,8 +88,8 @@ async function main() {
   } else if (cmd === "grok") {
     await grok(args[0]);
   } else if (cmd === "who") {
-    const { formatWho } = await import("./mcp.mjs");
-    console.log(formatWho(await ask({ op: "who" })));
+    const { formatWho } = await import("./mcp.ts");
+    console.log(formatWho(await ask<Who>({ op: "who" })));
   } else if (cmd === "send") {
     const as = flag(args, "as");
     const reply_to = flag(args, "reply-to");
@@ -101,13 +102,13 @@ async function main() {
   } else if (cmd === "wake") {
     await wakeCommand(args);
   } else if (cmd === "daemon") {
-    const { startDaemon } = await import("./daemon.mjs");
+    const { startDaemon } = await import("./daemon.ts");
     try {
       await startDaemon();
     } catch (e) {
       // 2 つ目は正常に終わる。launchd は失敗したときだけ起こし直すので、繰り返し起動されない。
-      if (e.code !== "ALREADY_RUNNING") throw e;
-      console.error(e.message);
+      if ((e as NodeJS.ErrnoException).code !== "ALREADY_RUNNING") throw e;
+      console.error((e as Error).message);
       process.exit(0);
     }
   } else if (cmd === "mcp") {
@@ -116,7 +117,7 @@ async function main() {
     if (as) process.env.NENWA_AS = as;
     const agent = flag(args, "agent");
     if (agent) process.env.NENWA_AGENT = agent;
-    const { runMcp } = await import("./mcp.mjs");
+    const { runMcp } = await import("./mcp.ts");
     runMcp();
   } else if (cmd === "hook") {
     await hook(args[0], args[1]);
@@ -132,18 +133,18 @@ async function main() {
   }
 }
 
-const print = (r) => console.log(JSON.stringify(r, null, 2));
+const print = (r: unknown) => console.log(JSON.stringify(r, null, 2));
 
 // フックはエージェントの動きを止めないことが一番大事。デーモンがなければ何も出さずに終わる（起動もしない）。
-async function hook(agent, event) {
+async function hook(agent: string, event: string) {
   let raw = "";
   process.stdin.setEncoding("utf8");
   await new Promise((resolve) => {
-    process.stdin.on("data", (d) => (raw += d));
+    process.stdin.on("data", (d: string) => (raw += d));
     process.stdin.on("end", resolve);
     setTimeout(resolve, 3000);
   });
-  let input = {};
+  let input: unknown = {};
   try {
     input = JSON.parse(raw || "{}");
   } catch {}
@@ -155,8 +156,8 @@ async function hook(agent, event) {
 const LABEL = "me.nenwa.daemon";
 const PLIST = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
 
-function reportSetup(remove) {
-  return import("./setup.mjs").then(({ setupAgents }) => {
+function reportSetup(remove: boolean) {
+  return import("./setup.ts").then(({ setupAgents }) => {
     const done = setupAgents({ remove });
     for (const r of done) console.log(`${r.agent}: ${remove ? "外しました" : "登録しました"}（${r.files.join("、")}。元のファイルは .bak-nenwa）`);
     if (!done.length) console.log("Codex と Cursor の設定フォルダは見つかりませんでした");
@@ -168,7 +169,7 @@ function reportSetup(remove) {
 
 function uninstall() {
   try {
-    execFileSync("launchctl", ["bootout", `gui/${process.getuid()}/${LABEL}`], { stdio: "ignore" });
+    execFileSync("launchctl", ["bootout", `gui/${process.getuid!()}/${LABEL}`], { stdio: "ignore" });
   } catch {}
   fs.rmSync(PLIST, { force: true });
   try {
@@ -178,25 +179,25 @@ function uninstall() {
   return reportSetup(true);
 }
 
-async function ask(req) {
+async function ask<T = unknown>(req: Request): Promise<T> {
   const res = await request(req);
   if (!res.ok) throw new Error(res.error);
-  return res.result;
+  return res.result as T;
 }
 
 // 鍵は画面にも会話にも出さない。クリップボードか、既存の { url, key } の JSON から読む。
-async function wakeCommand(args) {
-  const { saveWake, loadWake, wake } = await import("./wake.mjs");
-  const { MAILBOX_NAME } = await import("./message.mjs");
-  const name = args.shift();
-  if (!MAILBOX_NAME.test(name || "")) throw new Error("受信箱の名前を指定してください（例: nenwa wake grok <URL>）");
+async function wakeCommand(args: string[]) {
+  const { saveWake, loadWake, wake } = await import("./wake.ts");
+  const { MAILBOX_NAME } = await import("./message.ts");
+  const name = args.shift() || "";
+  if (!MAILBOX_NAME.test(name)) throw new Error("受信箱の名前を指定してください（例: nenwa wake grok <URL>）");
   if (args[0] === "--test") {
     if (!loadWake(name)) throw new Error(`${name} の webhook はまだ設定されていません`);
     const status = await wake(name, { source: "nenwa", mailbox: name, test: true, text: "nenwa からの試しの呼び出しです。何もしなくて大丈夫です。", sent_at: new Date().toISOString() });
     console.log(`webhook の応答: HTTP ${status}`);
     return;
   }
-  let url, key;
+  let url: string, key: string;
   if (args[0] === "--import") {
     const p = (args[1] || "").replace(/^~(?=\/)/, os.homedir());
     ({ url, key } = JSON.parse(fs.readFileSync(p, "utf8")));
@@ -214,14 +215,14 @@ async function restartDaemon() {
   // plist の状態フォルダが今のものと同じときだけ（テストや別の NENWA_HOME で本物のデーモンを起こし直さない）
   if (fs.existsSync(PLIST) && fs.readFileSync(PLIST, "utf8").includes(`<string>${HOME_DIR}</string>`)) {
     try {
-      execFileSync("launchctl", ["kickstart", "-k", `gui/${process.getuid()}/${LABEL}`], { stdio: "ignore" });
+      execFileSync("launchctl", ["kickstart", "-k", `gui/${process.getuid!()}/${LABEL}`], { stdio: "ignore" });
       return;
     } catch {}
   }
   if (await tryRequest({ op: "shutdown" })) for (let i = 0; i < 30 && fs.existsSync(SOCK); i++) await new Promise((r) => setTimeout(r, 100));
 }
 
-async function grok(url) {
+async function grok(url: string | undefined) {
   if (!url) throw new Error("Grok Bot の routine の webhook URL を付けてください（sender key はクリップボードにコピーしてから）");
   if (!loadConfig()) throw new Error("まだ nenwa が入っていません。nenwa install を先に");
   await wakeCommand(["grok", url]);
@@ -274,7 +275,7 @@ async function install() {
 `;
   fs.mkdirSync(path.dirname(plist), { recursive: true });
   fs.writeFileSync(plist, xml);
-  const domain = `gui/${process.getuid()}`;
+  const domain = `gui/${process.getuid!()}`;
   try {
     execFileSync("launchctl", ["bootout", `${domain}/${label}`], { stdio: "ignore" });
   } catch {}

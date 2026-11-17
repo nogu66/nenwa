@@ -4,12 +4,17 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHmac, randomUUID } from "node:crypto";
-import { HOME_DIR } from "./state.mjs";
+import { HOME_DIR } from "./state.ts";
 
 export const WAKE_DIR = path.join(HOME_DIR, "wake");
-const file = (name) => path.join(WAKE_DIR, `${name}.json`);
+const file = (name: string) => path.join(WAKE_DIR, `${name}.json`);
 
-export function loadWake(name) {
+export interface WakeConfig {
+  url: string;
+  key: string;
+}
+
+export function loadWake(name: string): WakeConfig | null {
   try {
     const c = JSON.parse(fs.readFileSync(file(name), "utf8"));
     return c.url && c.key ? c : null;
@@ -18,7 +23,7 @@ export function loadWake(name) {
   }
 }
 
-export function saveWake(name, url, key) {
+export function saveWake(name: string, url: string, key: string): void {
   if (!/^https?:\/\//.test(url || "")) throw new Error("webhook の URL が正しくありません");
   if (!key) throw new Error("鍵が空です");
   if (/^https?:\/\//.test(key) || key === url)
@@ -27,8 +32,8 @@ export function saveWake(name, url, key) {
   fs.writeFileSync(file(name), JSON.stringify({ url, key }, null, 2) + "\n", { mode: 0o600 });
 }
 
-export function wakeHeaders(key, body) {
-  const headers = { "content-type": "application/json" };
+export function wakeHeaders(key: string, body: string): Record<string, string> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
   if (key.startsWith("whsec_")) {
     const id = `msg_${randomUUID().replaceAll("-", "")}`;
     const ts = String(Math.floor(Date.now() / 1000));
@@ -40,7 +45,7 @@ export function wakeHeaders(key, body) {
   return headers;
 }
 
-export async function wake(name, payload) {
+export async function wake(name: string, payload: unknown): Promise<number | null> {
   const c = loadWake(name);
   if (!c) return null;
   const body = JSON.stringify(payload);
