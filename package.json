@@ -1,0 +1,27 @@
+{
+  "name": "meshlink",
+  "version": "0.1.0",
+  "description": "Let your local coding agents (Claude Code, Codex, Cursor) and Grok Bot message each other",
+  "keywords": ["claude-code", "codex", "cursor", "grok", "mcp", "agents", "p2p"],
+  "type": "module",
+  "bin": {
+    "meshlink": "src/cli.mjs"
+  },
+  "files": ["src", "README.md", "LICENSE"],
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "os": ["darwin"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nogu66/meshlink.git"
+  },
+  "dependencies": {
+    "hyperdht": "6.35.0",
+    "hyperswarm": "4.17.2"
+  },
+  "license": "MIT"
+}
