@@ -2,7 +2,7 @@
 
 [English](README.md) | 日本語 | [简体中文](README.zh-CN.md)
 
-自分のエージェント同士（Claude Code、Codex、Cursor、Grok Bot）がメッセージを送り合えるようにする小さなツール。たとえば Claude Code に「Codex にこの API の型を聞いて」と頼むと、Codex の会話に届き、返事が Claude Code に戻ってくる。1 つの実行ファイルで動く（Node.js は要らない）。Mac、Linux、Windows で動く。
+自分のエージェント同士（Claude Code、Codex、Cursor、Gemini CLI、Qwen Code、Grok Bot）がメッセージを送り合えるようにする小さなツール。たとえば Claude Code に「Codex にこの API の型を聞いて」と頼むと、Codex の会話に届き、返事が Claude Code に戻ってくる。1 つの実行ファイルで動く（Node.js は要らない）。Mac、Linux、Windows で動く。
 
 名前は「念話」（離れた仲間と心で話す、アニメでおなじみの力）から。
 
@@ -24,7 +24,7 @@ irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1 | iex
 
 - このパソコンの中だけのネットワークを作る（外とはつながない）
 - ログイン時にデーモンが起動するようにする（Mac は launchd、Linux は `systemd --user`、Windows はタスク スケジューラ）
-- 入っているエージェントに登録する: Claude Code（MCP）、Codex（MCP とフック）、Cursor（MCP とフック）。書き換える前の設定ファイルは `.bak-nenwa` に残す
+- 入っているエージェントに登録する: Claude Code（MCP）、Codex（MCP とフック）、Cursor（MCP とフック）、Gemini CLI と Qwen Code（MCP とフック）。書き換える前の設定ファイルは `.bak-nenwa` に残す
 
 そのあと:
 
@@ -93,17 +93,21 @@ Claude Code に出るツールは 2 つ（Grok Bot など受信箱を持つ相�
 | `send_message(to, message, reply_to?)` | 送る。結果は `delivered` / `inbox` / `queued` / `no_session` / `refused` / `rate_limited` |
 | `check_inbox(wait_secs?)` | 受信箱を読む。空なら最長 50 秒待てる |
 
-## Codex と Cursor
+## Codex、Cursor、Gemini CLI、Qwen Code
 
-`install` で Codex（`~/.codex/config.toml` と `hooks.json`）と Cursor（`~/.cursor/mcp.json` と `hooks.json`）にも MCP サーバーとフックを足す。書き換える前のファイルは `.bak-nenwa` に残し、ほかのフックや MCP サーバーには触らない。`nenwa setup --remove` で外せる。
+`install` で Codex（`~/.codex/config.toml` と `hooks.json`）と Cursor（`~/.cursor/mcp.json` と `hooks.json`）、Gemini CLI（`~/.gemini/settings.json`）、Qwen Code（`~/.qwen/settings.json`）にも MCP サーバーとフックを足す。設定フォルダがあるものだけが対象。書き換える前のファイルは `.bak-nenwa` に残し、ほかのフックや MCP サーバーには触らない。`nenwa setup --remove` で外せる。
 
 | | 宛先が決まる | 待機中に届いたら | 作業中に届いたら |
 |---|---|---|---|
 | Codex | `SessionStart` フック | `codex queue --thread <ID>` で会話に入れる（そこで動き出す） | 同じ。失敗したら受信箱に置き、`PostToolUse` で差し込むか `Stop` で続けさせる |
 | Cursor | `sessionStart` フック | 受信箱で待つ（次に動いたときに届く） | `postToolUse` で差し込み、`stop` の `followup_message` で続けさせる |
+| Gemini CLI | `SessionStart` フック | 受信箱で待つ（次に動いたときに届く） | `BeforeAgent` と `AfterTool` で差し込み、`AfterAgent` の `decision: "deny"` で続けさせる |
+| Qwen Code | `SessionStart` フック | 受信箱で待つ（次に動いたときに届く） | `UserPromptSubmit` と `PostToolUse` で差し込み、`Stop` の `decision: "block"` で続けさせる |
 
 - 宛先は `<人>/<フォルダ名>-<会話 ID の末尾 4 文字>@<マシン>`。セッションが始まったときに、その宛先が会話に知らされる。
-- MCP サーバー（`mcp --agent codex|cursor`）は、どの会話から呼ばれたかを知らない。送り主は「その種類のエージェントで作業中、フォルダが合う、最近動いた」会話を選ぶ。同じ種類のセッションを同時にいくつも動かすと、取り違えることがある。
+- フックと MCP サーバー（`mcp --agent <名前>`）は、自分を起動した親プロセスをデーモンに伝える。デーモンは 2 回のフックに共通する親を、そのエージェントの本体として覚える。MCP から送るときの送り主は、同じ本体から起動された会話に決まる。本体がまだ分からないうちは「作業中、フォルダが合う、最近動いた」会話を選ぶ。
+- 本体のプロセスが消えた会話は、一覧から外れる（そこへ送ると `no_session`）。
+- Gemini CLI と Qwen Code は公式ドキュメントの仕様どおりに作ってあり、偽の入力でのテストだけ済んでいる。本物での確認はまだ。`settings.json` がコメント入りなどで読めないときは、書き換えずにそのままにする。
 - Codex はフックを信頼するまで動かさない。`install` のあとに開いたセッションで `/hooks` を開いて、nenwa のフックを信頼する。
 - Cursor の `beforeSubmitPrompt` は会話に文章を足せないので、そこでは取り出さない。
 - フックはデーモンが動いていなければ何も出さずに終わる（エージェントの動きを止めない）。
@@ -177,7 +181,7 @@ Muse が使えるのは `list_team` / `send_message` / `check_inbox` の 3 つ�
 | `wake/<名前>.json` | 受信箱を起こす webhook の URL と鍵（権限 600） |
 | `http/keys.json` | `nenwa muse` の鍵の SHA-256（権限 600。鍵そのものは残さない） |
 | `http/enabled` | HTTP の入り口が開いている間だけある。ポート、閉じる時刻、Funnel を使うか（デーモンが再起動したときに開き直す） |
-| `agents.json` | フックで見えた Codex / Cursor の会話（1 日見えなければ忘れる） |
+| `agents.json` | フックで見えた Codex / Cursor / Gemini CLI / Qwen Code の会話（1 日見えなければ忘れる） |
 | `peers.json` | つながったことのあるパソコンの名前と住所（起動のたびにつなぎ直す） |
 | `sock` | デーモンの unix ソケット |
 | `daemon.log` | ログ |
@@ -207,7 +211,7 @@ GitHub Actions（`.github/workflows/ci.yml`）は、Linux と Windows で fmt、
 
 ## 削ったもの
 
-Claude Code・Codex・Cursor・Grok Bot 以外のエージェント（Gemini CLI や opencode なども、`mcp --as <名前>` の受信箱なら同じ形でつなげる。届くのは自分で check_inbox したとき）、署名つきの名簿、アカウントでのサインイン、ファイル添付、承認のポップアップ（`ask_user`）、メニューバー表示、自前のリレー。
+Claude Code・Codex・Cursor・Gemini CLI・Qwen Code・Grok Bot 以外のエージェント（opencode や Copilot CLI なども、`mcp --as <名前>` の受信箱なら同じ形でつなげる。届くのは自分で check_inbox したとき）、署名つきの名簿、アカウントでのサインイン、ファイル添付、承認のポップアップ（`ask_user`）、メニューバー表示、自前のリレー。
 
 ## 気をつけること
 

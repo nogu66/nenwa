@@ -2,7 +2,7 @@
 
 English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-A small tool that lets your own agents (Claude Code, Codex, Cursor, Grok Bot) send messages to each other. For example, ask Claude Code to "ask Codex for the type this API returns", and the question lands in the Codex conversation and the answer comes back to Claude Code. It is a single executable (no Node.js needed) and runs on macOS, Linux and Windows.
+A small tool that lets your own agents (Claude Code, Codex, Cursor, Gemini CLI, Qwen Code, Grok Bot) send messages to each other. For example, ask Claude Code to "ask Codex for the type this API returns", and the question lands in the Codex conversation and the answer comes back to Claude Code. It is a single executable (no Node.js needed) and runs on macOS, Linux and Windows.
 
 The name comes from 念話 ("nenwa"): telepathic speech between distant allies, a common power in anime.
 
@@ -24,7 +24,7 @@ That one line places the executable (`~/.local/bin/nenwa` on macOS and Linux, `%
 
 - Creates a network that stays inside this computer (it does not connect to anything outside)
 - Starts the daemon at login (launchd on macOS, `systemd --user` on Linux, Task Scheduler on Windows)
-- Registers nenwa with the agents you have installed: Claude Code (MCP), Codex (MCP and hooks), Cursor (MCP and hooks). The config files are backed up as `.bak-nenwa` before they are changed
+- Registers nenwa with the agents you have installed: Claude Code (MCP), Codex (MCP and hooks), Cursor (MCP and hooks), Gemini CLI and Qwen Code (MCP and hooks). The config files are backed up as `.bak-nenwa` before they are changed
 
 Then:
 
@@ -93,17 +93,21 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 | `send_message(to, message, reply_to?)` | Sends. The result is `delivered` / `inbox` / `queued` / `no_session` / `refused` / `rate_limited` |
 | `check_inbox(wait_secs?)` | Reads the inbox. If it is empty, it can wait up to 50 seconds |
 
-## Codex and Cursor
+## Codex, Cursor, Gemini CLI and Qwen Code
 
-`install` also adds the MCP server and hooks to Codex (`~/.codex/config.toml` and `hooks.json`) and Cursor (`~/.cursor/mcp.json` and `hooks.json`). The files are backed up as `.bak-nenwa` before they are changed, and other hooks and MCP servers are left alone. `nenwa setup --remove` removes them.
+`install` also adds the MCP server and hooks to Codex (`~/.codex/config.toml` and `hooks.json`) and Cursor (`~/.cursor/mcp.json` and `hooks.json`), Gemini CLI (`~/.gemini/settings.json`) and Qwen Code (`~/.qwen/settings.json`). Only agents whose config folder exists are touched. The files are backed up as `.bak-nenwa` before they are changed, and other hooks and MCP servers are left alone. `nenwa setup --remove` removes them.
 
 | | Address set by | Arrives while idle | Arrives while working |
 |---|---|---|---|
 | Codex | `SessionStart` hook | Put into the conversation with `codex queue --thread <ID>` (it starts working there) | Same. If that fails, it goes to the inbox and is injected at `PostToolUse` or continued at `Stop` |
 | Cursor | `sessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `postToolUse`, and continued with `followup_message` at `stop` |
+| Gemini CLI | `SessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `BeforeAgent` and `AfterTool`, and continued with `decision: "deny"` at `AfterAgent` |
+| Qwen Code | `SessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `UserPromptSubmit` and `PostToolUse`, and continued with `decision: "block"` at `Stop` |
 
 - The address is `<person>/<folder name>-<last 4 chars of the conversation ID>@<machine>`. When a session starts, the conversation is told its address.
-- The MCP server (`mcp --agent codex|cursor`) does not know which conversation called it. As the sender, it picks a conversation of that agent type that is working, in the matching folder, and recently active. If you run several sessions of the same type at once, it can pick the wrong one.
+- The hooks and the MCP server (`mcp --agent <name>`) tell the daemon which processes started them. The daemon remembers the parent shared by two hook calls as the agent itself. A message sent through MCP gets, as its sender, the conversation started by the same agent process. Until that process is known, the daemon picks a conversation that is working, in the matching folder, and recently active.
+- A conversation whose agent process is gone leaves the list (sending to it gives `no_session`).
+- Gemini CLI and Qwen Code support follows their official docs and is tested with fake input only; it has not been checked against the real tools yet. If `settings.json` cannot be parsed (comments, for example), it is left as it is.
 - Codex does not run hooks until you trust them. After `install`, open `/hooks` in a newly opened session and trust the nenwa hooks.
 - Cursor's `beforeSubmitPrompt` cannot add text to the conversation, so messages are not taken out there.
 - If the daemon is not running, the hooks exit without output (they never block the agent).
@@ -177,7 +181,7 @@ Muse gets `list_team` / `send_message` / `check_inbox`, and always sends as the 
 | `wake/<name>.json` | URL and key of the webhook that wakes an inbox (mode 600) |
 | `http/keys.json` | SHA-256 of the key for `nenwa muse` (mode 600. The key itself is not stored) |
 | `http/enabled` | Present while the HTTP endpoint is open: port, closing time, whether Funnel is used (the daemon reopens it after a restart) |
-| `agents.json` | Codex / Cursor conversations seen through the hooks (forgotten after one day unseen) |
+| `agents.json` | Codex / Cursor / Gemini CLI / Qwen Code conversations seen through the hooks (forgotten after one day unseen) |
 | `peers.json` | Names and addresses of computers it has connected to (reconnected on every start) |
 | `sock` | The daemon's unix socket |
 | `daemon.log` | Log |
@@ -207,7 +211,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs fmt, clippy and the tests on Li
 
 ## Left out
 
-Agents other than Claude Code, Codex, Cursor and Grok Bot (Gemini CLI, opencode and others can connect the same way through an `mcp --as <name>` inbox; messages arrive only when they call check_inbox themselves), a signed member list, account sign-in, file attachments, approval pop-ups (`ask_user`), a menu bar display, and a self-hosted relay.
+Agents other than Claude Code, Codex, Cursor, Gemini CLI, Qwen Code and Grok Bot (opencode, Copilot CLI and others can connect the same way through an `mcp --as <name>` inbox; messages arrive only when they call check_inbox themselves), a signed member list, account sign-in, file attachments, approval pop-ups (`ask_user`), a menu bar display, and a self-hosted relay.
 
 ## Caveats
 

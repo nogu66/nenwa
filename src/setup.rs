@@ -1,4 +1,4 @@
-// Codex と Cursor の設定に nenwa の MCP サーバーとフックを足す（外す）。
+// Codex、Cursor、Gemini CLI、Qwen Code の設定に nenwa の MCP サーバーとフックを足す（外す）。
 // 書き換える前に一度だけ <ファイル>.bak-nenwa を残す。ほかのフックや MCP サーバーには触らない。
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ fn hook_command(agent: &str, event: &str) -> String {
 // パスでは見分けない。フォルダを移したときや、入れ直したときに、古い場所を指すフックが残って重なってしまうため。
 // 今の形は `…/nenwa' hook codex …`（Windows は `nenwa.exe"`）、TS 版の古い形は `…/cli.js' hook codex …`。
 fn is_our_command(c: &str) -> bool {
-    for agent in ["codex", "cursor"] {
+    for agent in ["codex", "cursor", "gemini", "qwen"] {
         let needle = format!(" hook {agent} ");
         for (i, _) in c.match_indices(&needle) {
             let before = &c[..i];
@@ -223,8 +223,100 @@ fn setup_cursor(remove: bool) -> Option<SetupResult> {
     Some(SetupResult { agent: "cursor", files: vec![mcp_file.display().to_string(), hooks_file.display().to_string()] })
 }
 
+// ---- Gemini CLI と Qwen Code ----
+// どちらも settings.json に mcpServers と hooks（Claude Code と同じ入れ子）を持つ。違うのはイベントの名前と、時間制限の単位。
+const GEMINI_EVENTS: [(&str, &str); 5] = [
+    ("SessionStart", "session-start"),
+    ("BeforeAgent", "user-prompt-submit"),
+    ("AfterTool", "post-tool-use"),
+    ("AfterAgent", "stop"),
+    ("SessionEnd", "session-end"),
+];
+const QWEN_EVENTS: [(&str, &str); 5] = [
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "user-prompt-submit"),
+    ("PostToolUse", "post-tool-use"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+];
+
+fn setup_settings_json(
+    agent: &'static str,
+    dir: PathBuf,
+    events: &[(&str, &str)],
+    timeout: u32, // Gemini はミリ秒、Qwen は秒
+    remove: bool,
+) -> Option<SetupResult> {
+    if !dir.exists() {
+        return None;
+    }
+    let file = dir.join("settings.json");
+    // 読めない形（コメント入りなど）のときは、中身を失わないよう触らない
+    let mut data = match std::fs::read_to_string(&file) {
+        Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
+            Ok(Value::Object(m)) => m,
+            _ => {
+                eprintln!("{agent}: {} を読めなかったので、そのままにしました", file.display());
+                return None;
+            }
+        },
+        _ => Map::new(),
+    };
+    let before = data.clone();
+    if remove {
+        if let Some(servers) = data.get_mut("mcpServers").and_then(Value::as_object_mut) {
+            servers.remove("nenwa");
+        }
+    } else {
+        ensure_obj(&mut data, "mcpServers")
+            .insert("nenwa".into(), json!({ "command": exe().to_string_lossy(), "args": ["mcp", "--agent", agent] }));
+    }
+    if !remove || data.get("hooks").is_some_and(Value::is_object) {
+        let hooks = ensure_obj(&mut data, "hooks");
+        for (event, name) in events {
+            let mut groups: Vec<Value> = hooks
+                .get(*event)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|g| {
+                    let mut g = g.as_object().cloned().unwrap_or_default();
+                    let list: Vec<Value> =
+                        g.get("hooks").and_then(Value::as_array).into_iter().flatten().filter(|h| !is_ours(h)).cloned().collect();
+                    g.insert("hooks".into(), Value::Array(list));
+                    Value::Object(g)
+                })
+                .filter(|g| g["hooks"].as_array().is_some_and(|l| !l.is_empty()))
+                .collect();
+            if !remove {
+                groups.push(
+                    json!({ "hooks": [{ "type": "command", "name": "nenwa", "command": hook_command(agent, name), "timeout": timeout }] }),
+                );
+            }
+            if groups.is_empty() {
+                hooks.remove(*event);
+            } else {
+                hooks.insert((*event).into(), Value::Array(groups));
+            }
+        }
+    }
+    if data != before {
+        backup(&file);
+        write_json(&file, &data);
+    }
+    Some(SetupResult { agent, files: vec![file.display().to_string()] })
+}
+
 pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
-    [setup_codex(remove), setup_cursor(remove)].into_iter().flatten().collect()
+    [
+        setup_codex(remove),
+        setup_cursor(remove),
+        setup_settings_json("gemini", dir_from("NENWA_GEMINI_DIR", ".gemini"), &GEMINI_EVENTS, 10_000, remove),
+        setup_settings_json("qwen", dir_from("NENWA_QWEN_DIR", ".qwen"), &QWEN_EVENTS, 10, remove),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
 }
 
 #[cfg(test)]
@@ -238,6 +330,8 @@ mod tests {
         assert!(is_our_command("'/usr/bin/node' '/old/place/src/cli.mjs' hook cursor stop"));
         assert!(!is_our_command("echo other"));
         assert!(!is_our_command("'/bin/other' hook codex stop"));
+        assert!(is_our_command("'/Users/a/.local/bin/nenwa' hook gemini stop"));
+        assert!(is_our_command("'/Users/a/.local/bin/nenwa' hook qwen session-start"));
     }
 
     #[test]

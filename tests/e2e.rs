@@ -76,6 +76,8 @@ impl Home {
             "NENWA_WAKE_KEY",
             "NENWA_CODEX_DIR",
             "NENWA_CURSOR_DIR",
+            "NENWA_GEMINI_DIR",
+            "NENWA_QWEN_DIR",
             "XDG_CONFIG_HOME",
             "NENWA_HTTP_PORT",
             "NENWA_HTTP_TTL_SECS",
@@ -248,8 +250,15 @@ fn fake_session(h: &Home, folder: &str, session_id: &str) -> Session {
 }
 
 fn start_daemon(h: &Home) -> Child {
-    let log = std::fs::OpenOptions::new().create(true).append(true).open(h.home.join("test-daemon.log")).unwrap();
-    h.command(&["daemon"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().unwrap()
+    let file = h.home.join("test-daemon.log");
+    let ups = || std::fs::read_to_string(&file).unwrap_or_default().matches(" daemon up ").count();
+    let before = ups();
+    let log = std::fs::OpenOptions::new().create(true).append(true).open(&file).unwrap();
+    let mut p = h.command(&["daemon"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().unwrap();
+    // 立ち上がる前に CLI を呼ぶと、CLI が自分でもう 1 つ起動してしまい、こちらが負けて終わる。起動のログを待つ。
+    until(|| (ups() > before || p.try_wait().is_ok_and(|s| s.is_some())).then_some(()));
+    assert!(p.try_wait().unwrap().is_none(), "デーモンが起動しませんでした: {}", std::fs::read_to_string(&file).unwrap_or_default());
+    p
 }
 
 // SIGTERM で止める（デーモンは仲間とのつながりを閉じてから終わる）。Windows は shutdown を頼む。
@@ -819,6 +828,57 @@ fn 同じフォルダの会話が2つあっても_送り主は呼んだ本体で
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(second)));
 }
 
+const GEMINI_ID: &str = "7d1e2f3a-aaaa-bbbb-cccc-00000000f00d";
+const GEMINI_ADDR: &str = "alice/docs-f00d@alice-mac";
+
+// Gemini CLI はイベントの名前が違い、応答の終わりで続けさせる言葉が deny。Qwen Code は Codex と同じ形。
+fn gemini_cliとqwen_code_フックで宛先が決まり_それぞれの形で届く(c: &Ctx) {
+    let input = |event: &str| json!({ "session_id": GEMINI_ID, "cwd": "/work/docs", "hook_event_name": event });
+    let start = hook_call(&c.alice, "gemini", "session-start", input("SessionStart")).unwrap();
+    assert_eq!(start["hookSpecificOutput"]["hookEventName"], "SessionStart");
+    assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains(&format!("宛先は {GEMINI_ADDR}")));
+    assert!(who_has(&c.bob, GEMINI_ADDR) || until(|| who_has(&c.bob, GEMINI_ADDR).then_some(true)));
+
+    // 外から会話に入れる口はないので、受信箱に置いて次のフックで渡す
+    assert_eq!(cli_json(&c.bob, &["send", GEMINI_ADDR, "入力の前に"])["state"], "inbox");
+    let prompt = hook_call(&c.alice, "gemini", "user-prompt-submit", input("BeforeAgent")).unwrap();
+    assert_eq!(prompt["hookSpecificOutput"]["hookEventName"], "BeforeAgent");
+    assert!(prompt["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("入力の前に"));
+    cli(&c.bob, &["send", GEMINI_ADDR, "ツールのあとに"]).unwrap();
+    let tool = hook_call(&c.alice, "gemini", "post-tool-use", input("AfterTool")).unwrap();
+    assert_eq!(tool["hookSpecificOutput"]["hookEventName"], "AfterTool");
+    assert!(tool["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("ツールのあとに"));
+    cli(&c.bob, &["send", GEMINI_ADDR, "止まる前に"]).unwrap();
+    let stop = hook_call(&c.alice, "gemini", "stop", input("AfterAgent")).unwrap();
+    assert_eq!(stop["decision"], "deny");
+    assert!(stop["reason"].as_str().unwrap().contains("止まる前に"));
+    assert_eq!(hook_call(&c.alice, "gemini", "stop", input("AfterAgent")), None);
+
+    // MCP（--agent gemini）から送ると、その会話が送り主になる
+    let out = mcp_call(
+        &c.alice.with(&[("NENWA_AGENT", "gemini")]),
+        &[
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "bob/api-bbbb@bob-mac", "message": "Gemini から" } } }),
+        ],
+    );
+    let res: Value = serde_json::from_str(by_id(&out, 2)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(res["from"], GEMINI_ADDR);
+    hook_call(&c.alice, "gemini", "session-end", input("SessionEnd"));
+    until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(GEMINI_ADDR)));
+
+    let qwen = "alice/docs-beef@alice-mac";
+    let input = json!({ "session_id": "11112222-3333-4444-5555-66667777beef", "cwd": "/work/docs" });
+    hook_call(&c.alice, "qwen", "session-start", input.clone()).unwrap();
+    cli(&c.bob, &["send", qwen, "Qwen へ"]).unwrap();
+    let post = hook_call(&c.alice, "qwen", "post-tool-use", input.clone()).unwrap();
+    assert_eq!(post["hookSpecificOutput"]["hookEventName"], "PostToolUse");
+    assert!(post["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("Qwen へ"));
+    cli(&c.bob, &["send", qwen, "止まる前に"]).unwrap();
+    assert_eq!(hook_call(&c.alice, "qwen", "stop", input.clone()).unwrap()["decision"], "block");
+    hook_call(&c.alice, "qwen", "session-end", input);
+}
+
 fn フック_デーモンがなくても何も出さずに正常終了する(c: &Ctx) {
     let lonely = c.alice.with(&[("NENWA_HOME", &c.root.join("nobody").display().to_string())]);
     assert_eq!(hook_call(&lonely, "codex", "post-tool-use", json!({ "session_id": CODEX_ID })), None);
@@ -842,7 +902,24 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
         json!({ "version": 1, "hooks": { "stop": [{ "command": "echo other" }, stale_ts, stale] } }).to_string(),
     )
     .unwrap();
-    let h = c.alice.with(&[("NENWA_CODEX_DIR", &codex.display().to_string()), ("NENWA_CURSOR_DIR", &cursor.display().to_string())]);
+    // Gemini CLI: ほかの設定とフックを残す。Qwen Code: 読めない設定（コメント入り）には触らない。
+    let (gemini, qwen) = (c.root.join("gemini-home"), c.root.join("qwen-home"));
+    std::fs::create_dir_all(&gemini).unwrap();
+    std::fs::create_dir_all(&qwen).unwrap();
+    let gemini_before = json!({
+        "theme": "Default",
+        "mcpServers": { "other": { "command": "other" } },
+        "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "echo other" }] }] }
+    });
+    std::fs::write(gemini.join("settings.json"), gemini_before.to_string()).unwrap();
+    let qwen_text = "{\n  // コメント\n  \"theme\": \"Default\"\n}\n";
+    std::fs::write(qwen.join("settings.json"), qwen_text).unwrap();
+    let h = c.alice.with(&[
+        ("NENWA_CODEX_DIR", &codex.display().to_string()),
+        ("NENWA_CURSOR_DIR", &cursor.display().to_string()),
+        ("NENWA_GEMINI_DIR", &gemini.display().to_string()),
+        ("NENWA_QWEN_DIR", &qwen.display().to_string()),
+    ]);
     let read = |p: PathBuf| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
 
     cli(&h, &["setup"]).unwrap();
@@ -865,8 +942,21 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert_eq!(cu["hooks"]["stop"].as_array().unwrap().len(), 2);
     assert_eq!(cu["hooks"]["postToolUse"][0]["matcher"], "*");
     assert!(codex.join("config.toml.bak-nenwa").exists());
+    let g = read(gemini.join("settings.json"));
+    assert_eq!(g["theme"], "Default");
+    assert_eq!(g["mcpServers"]["other"]["command"], "other");
+    assert_eq!(g["mcpServers"]["nenwa"]["args"], json!(["mcp", "--agent", "gemini"]));
+    let mut keys: Vec<&String> = g["hooks"].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["AfterAgent", "AfterTool", "BeforeAgent", "SessionEnd", "SessionStart"]);
+    assert_eq!(g["hooks"]["SessionStart"].as_array().unwrap().len(), 2);
+    assert_eq!(g["hooks"]["AfterAgent"].as_array().unwrap().len(), 1);
+    assert!(re(r#"nenwa(\.exe)?['"] hook gemini stop$"#).is_match(g["hooks"]["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap()));
+    assert_eq!(g["hooks"]["AfterAgent"][0]["hooks"][0]["timeout"], 10_000);
+    assert_eq!(std::fs::read_to_string(qwen.join("settings.json")).unwrap(), qwen_text);
 
     cli(&h, &["setup", "--remove"]).unwrap();
+    assert_eq!(read(gemini.join("settings.json")), gemini_before);
     assert_eq!(std::fs::read_to_string(codex.join("config.toml")).unwrap().trim(), toml.trim());
     assert_eq!(read(codex.join("hooks.json"))["hooks"], json!({ "PostToolUse": [other_hook] }));
     assert_eq!(read(cursor.join("mcp.json"))["mcpServers"], json!({ "other": { "command": "other" } }));
@@ -972,9 +1062,13 @@ fn main() {
             "Codex: 同じフォルダの会話が 2 つあっても、送り主は呼んだ本体で決まる。本体が消えた会話は一覧から外れる",
             同じフォルダの会話が2つあっても_送り主は呼んだ本体で決まり_本体が消えた会話は一覧から外れる,
         ),
+        (
+            "Gemini CLI と Qwen Code: フックで宛先が決まり、それぞれの形で届く",
+            gemini_cliとqwen_code_フックで宛先が決まり_それぞれの形で届く,
+        ),
         ("フック: デーモンがなくても何も出さずに正常終了する", フック_デーモンがなくても何も出さずに正常終了する),
         (
-            "setup: Codex と Cursor にほかの設定を残したまま足し、--remove で元に戻す",
+            "setup: 各エージェントにほかの設定を残したまま足し、--remove で元に戻す",
             setup_codexとcursorにほかの設定を残したまま足し_removeで元に戻す,
         ),
         ("相手がオフラインなら outbox に置き、戻ったら届く", 相手がオフラインならoutboxに置き_戻ったら届く),

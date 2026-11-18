@@ -34,7 +34,7 @@ jobs:
       - name: daemon logs on failure
         if: failure()
         shell: bash
-        run: find "${RUNNER_TEMP:-/tmp}" "${TMPDIR:-/tmp}" -path '*nenwa-e2e-*' -name '*.log' 2>/dev/null | while read -r f; do echo "== $f"; cat "$f"; done
+        run: find "${RUNNER_TEMP:-/tmp}" "${TMPDIR:-/tmp}" -path '*nenwa-e2e-*' -name '*.log' 2>/dev/null | while read -r f; do echo "== $f"; cat "$f"; done || true
 
   build:
     name: build (${{ matrix.target }})

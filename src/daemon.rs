@@ -65,7 +65,7 @@ impl<T> Remember<T> {
     }
 }
 
-// フックでつながるエージェント（Codex、Cursor）の会話
+// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code）の会話
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Agent {
     pub agent: String,
@@ -395,7 +395,7 @@ impl Daemon {
     // フックの出力。届いているメッセージがあれば、そのエージェントのやり方で会話に差し込む。
     async fn hook_event(&self, req: &Value) -> Result<Value> {
         let agent = req["agent"].as_str().unwrap_or("undefined");
-        if !matches!(agent, "codex" | "cursor") {
+        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen") {
             bail!("unknown agent: {agent}");
         }
         let event = req["event"].as_str().unwrap_or("");
@@ -432,15 +432,17 @@ impl Daemon {
         if text.is_empty() {
             return Ok(if prompt { json!({ "continue": true }) } else { Value::Null });
         }
-        if agent == "codex" {
+        // Codex、Qwen Code、Gemini CLI は Claude Code と同じ形。Gemini だけイベントの名前と、続けさせるときの言葉が違う。
+        if agent != "cursor" {
+            let gemini = agent == "gemini";
             if event == "stop" {
-                return Ok(json!({ "decision": "block", "reason": text }));
+                return Ok(json!({ "decision": if gemini { "deny" } else { "block" }, "reason": text }));
             }
             let mut out = Map::new();
             let name = match event {
                 "session-start" => Some("SessionStart"),
-                "user-prompt-submit" => Some("UserPromptSubmit"),
-                "post-tool-use" => Some("PostToolUse"),
+                "user-prompt-submit" => Some(if gemini { "BeforeAgent" } else { "UserPromptSubmit" }),
+                "post-tool-use" => Some(if gemini { "AfterTool" } else { "PostToolUse" }),
                 _ => None,
             };
             if let Some(n) = name {
@@ -770,8 +772,9 @@ impl Daemon {
     }
 
     fn http_closed(e: &http::Enabled) {
-        http::clear();
+        // 先に書く（ファイルが消えたのを見てすぐログを読む人がいる）
         log!("http expired");
+        http::clear();
         if e.funnel {
             let port = e.port;
             tokio::task::spawn_blocking(move || {
