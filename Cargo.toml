@@ -1,0 +1,35 @@
+[package]
+name = "nenwa"
+version = "0.1.0"
+edition = "2024"
+description = "Let your local coding agents (Claude Code, Codex, Cursor) and Grok Bot message each other"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "=1.0.104"
+base64 = "=0.23.1"
+hmac = "=0.13.0"
+interprocess = { version = "=2.4.7", features = ["tokio"] }
+iroh = "=1.4.1"
+rand = "=0.10.3"
+rpassword = "=7.5.4"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.154", features = ["preserve_order"] }
+sha2 = "=0.11.1"
+tokio = { version = "=1.54.1", features = ["full"] }
+ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
+[dev-dependencies]
+regex = "=1.13.1"
+
+[[test]]
+name = "e2e"
+harness = false
+
+[profile.release]
+lto = true
+strip = true
