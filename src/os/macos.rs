@@ -29,13 +29,15 @@ fn xml_escape(s: &str) -> String {
 pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::Result<String> {
     let (exe, home, log) =
         (xml_escape(&exe.to_string_lossy()), xml_escape(&nenwa_home.to_string_lossy()), xml_escape(&log.to_string_lossy()));
+    // launchd の PATH は /usr/bin:/bin:/usr/sbin:/sbin だけなので、codex（Homebrew の node スクリプト）が見つからない。登録したときの PATH を渡す。
+    let path = xml_escape(&std::env::var("PATH").unwrap_or_default());
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>{LABEL}</string>
   <key>ProgramArguments</key><array><string>{exe}</string><string>daemon</string></array>
-  <key>EnvironmentVariables</key><dict><key>NENWA_HOME</key><string>{home}</string></dict>
+  <key>EnvironmentVariables</key><dict><key>NENWA_HOME</key><string>{home}</string><key>PATH</key><string>{path}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>StandardOutPath</key><string>{log}</string>

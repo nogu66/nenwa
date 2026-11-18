@@ -341,8 +341,17 @@ impl Daemon {
                 .stderr(std::process::Stdio::null())
                 .kill_on_drop(true);
             let ok = match cmd.spawn() {
-                Ok(mut child) => matches!(tokio::time::timeout(Duration::from_secs(20), child.wait()).await, Ok(Ok(s)) if s.success()),
-                Err(_) => false,
+                Ok(mut child) => match tokio::time::timeout(Duration::from_secs(20), child.wait()).await {
+                    Ok(Ok(s)) if s.success() => true,
+                    other => {
+                        log!("codex queue failed {}: {other:?}", a.label);
+                        false
+                    }
+                },
+                Err(e) => {
+                    log!("codex queue failed {}: {e}", a.label);
+                    false
+                }
             };
             if ok {
                 return "delivered";

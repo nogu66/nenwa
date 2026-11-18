@@ -23,9 +23,11 @@ pub fn parent_pid(pid: i64) -> Option<i64> {
 // 落ちたときだけ起こし直す（2 つ目のデーモンは正常に終わるので、繰り返し起動されない）
 fn unit_text(exe: &Path, nenwa_home: &Path, log: &Path) -> String {
     format!(
-        "[Unit]\nDescription=nenwa daemon\n\n[Service]\nExecStart=\"{}\" daemon\nEnvironment=\"NENWA_HOME={}\"\nRestart=on-failure\nStandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=nenwa daemon\n\n[Service]\nExecStart=\"{}\" daemon\nEnvironment=\"NENWA_HOME={}\"\nEnvironment=\"PATH={}\"\nRestart=on-failure\nStandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
         exe.display(),
         nenwa_home.display(),
+        // systemd --user の PATH は最小限なので、codex などが見つかるよう登録したときの PATH を渡す（% は systemd の指定子なので重ねる）
+        std::env::var("PATH").unwrap_or_default().replace('%', "%%").replace('"', ""),
         log.display(),
         log.display()
     )
