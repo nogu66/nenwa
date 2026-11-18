@@ -48,11 +48,17 @@ pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::R
     std::fs::write(&plist, xml)?;
     let domain = domain();
     launchctl(&["bootout", &format!("{domain}/{LABEL}")]);
-    let out = Command::new("launchctl").args(["bootstrap", &domain, &plist.to_string_lossy()]).output()?;
-    if !out.status.success() {
-        anyhow::bail!("launchctl bootstrap に失敗しました: {}", String::from_utf8_lossy(&out.stderr).trim());
+    // bootout は外し終わる前に戻ることがあり、直後の bootstrap が「5: Input/output error」で失敗する。少し待って数回やり直す。
+    let mut last = String::new();
+    for _ in 0..10 {
+        let out = Command::new("launchctl").args(["bootstrap", &domain, &plist.to_string_lossy()]).output()?;
+        if out.status.success() {
+            return Ok(plist.to_string_lossy().into_owned());
+        }
+        last = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    Ok(plist.to_string_lossy().into_owned())
+    anyhow::bail!("launchctl bootstrap に失敗しました: {last}")
 }
 
 pub fn autostart_remove() {
