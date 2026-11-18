@@ -23,7 +23,7 @@ pub fn report_setup(remove: bool) -> Vec<SetupResult> {
         );
     }
     if done.is_empty() {
-        println!("Codex、Cursor、OpenCode、Pi、Gemini CLI、Qwen Code、Copilot CLI の設定フォルダは見つかりませんでした");
+        println!("Codex、Cursor、OpenCode、Pi、Gemini CLI、Antigravity CLI、Qwen Code、Copilot CLI の設定フォルダは見つかりませんでした");
     }
     if !remove && done.iter().any(|r| r.agent == "codex") {
         println!("Codex: 次に開いたセッションで /hooks を開き、nenwa のフックを信頼してください（信頼するまでフックは動きません）");

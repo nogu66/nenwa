@@ -82,6 +82,7 @@ impl Home {
             "NENWA_COPILOT_DIR",
             "COPILOT_HOME",
             "NENWA_PI_DIR",
+            "NENWA_ANTIGRAVITY_DIR",
             "PI_CODING_AGENT_DIR",
             "XDG_CONFIG_HOME",
             "NENWA_HTTP_PORT",
@@ -896,6 +897,24 @@ fn pi_拡張の待ち受けに_届いたらすぐ渡す(c: &Ctx) {
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(addr)));
 }
 
+// Antigravity CLI: 会話の ID は conversationId。モデルを呼ぶ前に injectSteps で足し、Stop は continue で続けさせる。
+fn antigravity_cli_モデルを呼ぶ前と応答の終わりで届く(c: &Ctx) {
+    let addr = "alice/lab-7e57@alice-mac";
+    let input = json!({ "conversationId": "b1b2b3b4-0000-4000-8000-000000007e57", "workspacePaths": ["/work/lab"], "hookEventName": "SessionStart" });
+    let start = hook_call(&c.alice, "antigravity", "session-start", input.clone()).unwrap();
+    assert!(start["injectSteps"][0]["ephemeralMessage"].as_str().unwrap().contains(&format!("宛先は {addr}")));
+    assert_eq!(cli_json(&c.bob, &["send", addr, "モデルの前に"])["state"], "inbox");
+    let pre = hook_call(&c.alice, "antigravity", "post-tool-use", input.clone()).unwrap();
+    assert!(pre["injectSteps"][0]["ephemeralMessage"].as_str().unwrap().contains("モデルの前に"));
+    assert_eq!(hook_call(&c.alice, "antigravity", "post-tool-use", input.clone()), None);
+    cli(&c.bob, &["send", addr, "止まる前に"]).unwrap();
+    let stop = hook_call(&c.alice, "antigravity", "stop", input.clone()).unwrap();
+    assert_eq!(stop["decision"], "continue");
+    assert!(stop["reason"].as_str().unwrap().contains("止まる前に"));
+    hook_call(&c.alice, "antigravity", "session-end", input);
+    until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(addr)));
+}
+
 // Copilot CLI: 会話の ID は sessionId。文脈は additionalContext をいちばん上に置く。入力のときは足せない。
 fn copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く(c: &Ctx) {
     let addr = "alice/app-c0p1@alice-mac";
@@ -1013,7 +1032,12 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     std::fs::write(copilot.join("mcp-config.json"), copilot_before.to_string()).unwrap();
     let pi = c.root.join("pi-home");
     std::fs::create_dir_all(&pi).unwrap();
+    let agy = c.root.join("antigravity-config");
+    std::fs::create_dir_all(&agy).unwrap();
+    let agy_hooks = json!({ "other": { "Stop": [{ "type": "command", "command": "echo other" }] } });
+    std::fs::write(agy.join("hooks.json"), agy_hooks.to_string()).unwrap();
     let h = c.alice.with(&[
+        ("NENWA_ANTIGRAVITY_DIR", &agy.display().to_string()),
         ("NENWA_PI_DIR", &pi.display().to_string()),
         ("NENWA_COPILOT_DIR", &copilot.display().to_string()),
         ("NENWA_OPENCODE_DIR", &opencode.display().to_string()),
@@ -1065,6 +1089,13 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert!(!plugin.contains("__NENWA_EXE__"));
     let ext = std::fs::read_to_string(pi.join("extensions").join("nenwa.ts")).unwrap();
     assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&ext));
+    let ah = read(agy.join("hooks.json"));
+    assert_eq!(ah["other"], agy_hooks["other"]);
+    let mut keys: Vec<&String> = ah["nenwa"].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["PreInvocation", "SessionStart", "Stop"]);
+    assert!(re(r#"nenwa(\.exe)?['"] hook antigravity stop$"#).is_match(ah["nenwa"]["Stop"][0]["command"].as_str().unwrap()));
+    assert_eq!(read(agy.join("mcp_config.json"))["mcpServers"]["nenwa"]["args"], json!(["mcp", "--agent", "antigravity"]));
     let cp = read(copilot.join("mcp-config.json"))["mcpServers"].clone();
     assert_eq!(cp["other"]["command"], "other");
     assert_eq!(
@@ -1086,6 +1117,8 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert!(opencode.join("plugins").join("other.js").exists());
     assert_eq!(read(copilot.join("mcp-config.json")), copilot_before);
     assert!(!pi.join("extensions").join("nenwa.ts").exists());
+    assert_eq!(read(agy.join("hooks.json")), agy_hooks);
+    assert_eq!(read(agy.join("mcp_config.json"))["mcpServers"], json!({}));
     assert!(!copilot.join("hooks").join("nenwa.json").exists());
     assert!(copilot.join("hooks").join("other.json").exists());
     assert_eq!(std::fs::read_to_string(codex.join("config.toml")).unwrap().trim(), toml.trim());
@@ -1198,6 +1231,7 @@ fn main() {
             opencode_手元のサーバーに送って会話に入れる_届かなければプラグインのフックで渡す,
         ),
         ("Pi: 拡張の待ち受けに、届いたらすぐ渡す", pi_拡張の待ち受けに_届いたらすぐ渡す),
+        ("Antigravity CLI: モデルを呼ぶ前と応答の終わりで届く", antigravity_cli_モデルを呼ぶ前と応答の終わりで届く),
         ("Copilot CLI: フックで宛先が決まり、ツールのあとと応答の終わりで届く", copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く),
         (
             "Gemini CLI と Qwen Code: フックで宛先が決まり、それぞれの形で届く",

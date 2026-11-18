@@ -2,7 +2,7 @@
 
 English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
-A small tool that lets your own agents (Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Qwen Code, Grok Bot) send messages to each other. For example, ask Claude Code to "ask Codex for the type this API returns", and the question lands in the Codex conversation and the answer comes back to Claude Code. It is a single executable (no Node.js needed) and runs on macOS, Linux and Windows.
+A small tool that lets your own agents (Claude Code, Codex, Cursor, OpenCode, Pi, Copilot CLI, Gemini CLI, Antigravity CLI, Qwen Code, Grok Bot) send messages to each other. For example, ask Claude Code to "ask Codex for the type this API returns", and the question lands in the Codex conversation and the answer comes back to Claude Code. It is a single executable (no Node.js needed) and runs on macOS, Linux and Windows.
 
 The name comes from 念話 ("nenwa"): telepathic speech between distant allies, a common power in anime.
 
@@ -24,7 +24,7 @@ That one line places the executable (`~/.local/bin/nenwa` on macOS and Linux, `%
 
 - Creates a network that stays inside this computer (it does not connect to anything outside)
 - Starts the daemon at login (launchd on macOS, `systemd --user` on Linux, Task Scheduler on Windows)
-- Registers nenwa with the agents you have installed: Claude Code (MCP), Codex (MCP and hooks), Cursor (MCP and hooks), Gemini CLI and Qwen Code (MCP and hooks), OpenCode (MCP and a plugin). The config files are backed up as `.bak-nenwa` before they are changed
+- Registers nenwa with the agents you have installed: Claude Code (MCP), Codex (MCP and hooks), Cursor (MCP and hooks), Gemini CLI and Qwen Code (MCP and hooks), OpenCode (MCP and a plugin), Pi (an extension), Copilot CLI and Antigravity CLI (MCP and hooks). The config files are backed up as `.bak-nenwa` before they are changed
 
 Then:
 
@@ -93,15 +93,18 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 | `send_message(to, message, reply_to?)` | Sends. The result is `delivered` / `inbox` / `queued` / `no_session` / `refused` / `rate_limited` |
 | `check_inbox(wait_secs?)` | Reads the inbox. If it is empty, it can wait up to 50 seconds |
 
-## Codex, Cursor, OpenCode, Gemini CLI and Qwen Code
+## Codex, Cursor, OpenCode, Pi, Copilot CLI, Gemini CLI, Antigravity CLI and Qwen Code
 
-`install` also adds the MCP server and hooks to Codex (`~/.codex/config.toml` and `hooks.json`) and Cursor (`~/.cursor/mcp.json` and `hooks.json`), Gemini CLI (`~/.gemini/settings.json`) and Qwen Code (`~/.qwen/settings.json`). OpenCode has no command hooks, so `install` adds the MCP server to `~/.config/opencode/opencode.json` and places a small plugin that does the same job (`plugins/nenwa.js`). Only agents whose config folder exists are touched. The files are backed up as `.bak-nenwa` before they are changed, and other hooks and MCP servers are left alone. `nenwa setup --remove` removes them.
+`install` also adds the MCP server and hooks to Codex (`~/.codex/config.toml` and `hooks.json`) and Cursor (`~/.cursor/mcp.json` and `hooks.json`), Gemini CLI (`~/.gemini/settings.json`) and Qwen Code (`~/.qwen/settings.json`). OpenCode has no command hooks, so `install` adds the MCP server to `~/.config/opencode/opencode.json` and places a small plugin that does the same job (`plugins/nenwa.js`). Pi has no MCP either, so it gets an extension (`~/.pi/agent/extensions/nenwa.ts`) that provides the tools (`nenwa_list_team`, `nenwa_send_message`) and receives messages. Copilot CLI uses `~/.copilot/mcp-config.json` and `hooks/nenwa.json`; Antigravity CLI uses `~/.gemini/config/mcp_config.json` and `hooks.json`. Only agents whose config folder exists are touched. The files are backed up as `.bak-nenwa` before they are changed, and other hooks and MCP servers are left alone. `nenwa setup --remove` removes them.
 
 | | Address set by | Arrives while idle | Arrives while working |
 |---|---|---|---|
 | Codex | `SessionStart` hook | Put into the conversation with `codex queue --thread <ID>` (it starts working there) | Same. If that fails, it goes to the inbox and is injected at `PostToolUse` or continued at `Stop` |
 | Cursor | `sessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `postToolUse`, and continued with `followup_message` at `stop` |
 | OpenCode | The plugin (when a conversation is created, or on your input) | Sent to OpenCode's local server (`POST /session/<ID>/prompt_async`), which puts it into the conversation (it starts working there) | Same. If that fails, it goes to the inbox and is appended to the next tool result, or continued when the reply ends |
+| Pi | The extension (when a conversation starts) | The extension is waiting for messages and puts one into the conversation as it arrives (it starts working there). The sender sees `inbox` | Same (it goes in after the current step) |
+| Copilot CLI | `sessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `postToolUse`, and continued with `decision: "block"` at `agentStop` |
+| Antigravity CLI | `SessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected with `injectSteps` at `PreInvocation` (before each model call), and continued with `decision: "continue"` at `Stop` |
 | Gemini CLI | `SessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `BeforeAgent` and `AfterTool`, and continued with `decision: "deny"` at `AfterAgent` |
 | Qwen Code | `SessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `UserPromptSubmit` and `PostToolUse`, and continued with `decision: "block"` at `Stop` |
 
@@ -109,7 +112,8 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 - The hooks and the MCP server (`mcp --agent <name>`) tell the daemon which processes started them. The daemon remembers the parent shared by two hook calls as the agent itself. A message sent through MCP gets, as its sender, the conversation started by the same agent process. Until that process is known, the daemon picks a conversation that is working, in the matching folder, and recently active.
 - A conversation whose agent process is gone leaves the list (sending to it gives `no_session`).
 - OpenCode was checked with `opencode serve` 1.1.8: registration, delivery into an idle conversation, and `no_session` after the process is gone. The conversation is not told its address when it starts (doing so would start a reply by itself). Only a server address on this computer (127.0.0.1) is accepted.
-- Gemini CLI and Qwen Code support follows their official docs and is tested with fake input only; it has not been checked against the real tools yet. If `settings.json` cannot be parsed (comments, for example), it is left as it is.
+- Pi was checked with 0.82.1 in RPC mode: the extension loads, the conversation is listed, a message starts an idle conversation, and the sender of a tool call is that conversation.
+- Gemini CLI, Antigravity CLI, Qwen Code and Copilot CLI support follows their official docs and is tested with fake input only; it has not been checked against the real tools yet. If `settings.json` cannot be parsed (comments, for example), it is left as it is.
 - Codex does not run hooks until you trust them. After `install`, open `/hooks` in a newly opened session and trust the nenwa hooks.
 - Cursor's `beforeSubmitPrompt` cannot add text to the conversation, so messages are not taken out there.
 - If the daemon is not running, the hooks exit without output (they never block the agent).
@@ -183,7 +187,7 @@ Muse gets `list_team` / `send_message` / `check_inbox`, and always sends as the 
 | `wake/<name>.json` | URL and key of the webhook that wakes an inbox (mode 600) |
 | `http/keys.json` | SHA-256 of the key for `nenwa muse` (mode 600. The key itself is not stored) |
 | `http/enabled` | Present while the HTTP endpoint is open: port, closing time, whether Funnel is used (the daemon reopens it after a restart) |
-| `agents.json` | Codex / Cursor / OpenCode / Gemini CLI / Qwen Code conversations seen through the hooks (forgotten after one day unseen) |
+| `agents.json` | Conversations (Codex, Cursor, OpenCode, Pi, Copilot CLI, Gemini CLI, Antigravity CLI, Qwen Code) seen through the hooks (forgotten after one day unseen) |
 | `peers.json` | Names and addresses of computers it has connected to (reconnected on every start) |
 | `sock` | The daemon's unix socket |
 | `daemon.log` | Log |
@@ -213,7 +217,7 @@ GitHub Actions (`.github/workflows/ci.yml`) runs fmt, clippy and the tests on Li
 
 ## Left out
 
-Agents other than Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Qwen Code and Grok Bot (Copilot CLI, Kimi CLI and others can connect the same way through an `mcp --as <name>` inbox; messages arrive only when they call check_inbox themselves), a signed member list, account sign-in, file attachments, approval pop-ups (`ask_user`), a menu bar display, and a self-hosted relay.
+Agents other than the ones above (Kimi CLI, Kiro CLI and others can connect the same way through an `mcp --as <name>` inbox; messages arrive only when they call check_inbox themselves), a signed member list, account sign-in, file attachments, approval pop-ups (`ask_user`), a menu bar display, and a self-hosted relay.
 
 ## Caveats
 

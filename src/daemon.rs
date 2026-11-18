@@ -65,7 +65,7 @@ impl<T> Remember<T> {
     }
 }
 
-// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi）の会話
+// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi、Antigravity CLI）の会話
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Agent {
     pub agent: String,
@@ -317,7 +317,7 @@ impl Daemon {
 
     fn touch_agent(&self, st: &mut St, agent: &str, input: &Value, status: &str, anc: Vec<i64>) -> Option<String> {
         let mut id = js_str(&input["session_id"]);
-        for k in ["conversation_id", "sessionId"] {
+        for k in ["conversation_id", "sessionId", "conversationId"] {
             if id.is_empty() {
                 id = js_str(&input[k]);
             }
@@ -328,6 +328,7 @@ impl Daemon {
         let key = format!("{agent}:{id}");
         let cwd = s(input, "cwd")
             .or_else(|| input["workspace_roots"].get(0).and_then(Value::as_str).filter(|x| !x.is_empty()))
+            .or_else(|| input["workspacePaths"].get(0).and_then(Value::as_str).filter(|x| !x.is_empty()))
             .unwrap_or("")
             .to_string();
         // Codex の ID は先頭が時刻なので、ばらつく末尾の 4 文字を使う。
@@ -445,7 +446,7 @@ impl Daemon {
     // フックの出力。届いているメッセージがあれば、そのエージェントのやり方で会話に差し込む。
     async fn hook_event(&self, req: &Value) -> Result<Value> {
         let agent = req["agent"].as_str().unwrap_or("undefined");
-        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode" | "copilot" | "pi") {
+        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode" | "copilot" | "pi" | "antigravity") {
             bail!("unknown agent: {agent}");
         }
         let event = req["event"].as_str().unwrap_or("");
@@ -489,6 +490,13 @@ impl Daemon {
         }
         if matches!(agent, "opencode" | "pi") {
             return Ok(json!({ "text": text }));
+        }
+        if agent == "antigravity" {
+            return Ok(if event == "stop" {
+                json!({ "decision": "continue", "reason": text })
+            } else {
+                json!({ "injectSteps": [{ "ephemeralMessage": text }] })
+            });
         }
         if agent == "copilot" {
             return Ok(if event == "stop" { json!({ "decision": "block", "reason": text }) } else { json!({ "additionalContext": text }) });

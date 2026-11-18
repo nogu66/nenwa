@@ -1,4 +1,4 @@
-// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi の設定に nenwa の MCP サーバーとフックを足す（外す）。
+// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi、Antigravity CLI の設定に nenwa の MCP サーバーとフックを足す（外す）。
 // 書き換える前に一度だけ <ファイル>.bak-nenwa を残す。ほかのフックや MCP サーバーには触らない。
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -20,7 +20,7 @@ fn hook_command(agent: &str, event: &str) -> String {
 // パスでは見分けない。フォルダを移したときや、入れ直したときに、古い場所を指すフックが残って重なってしまうため。
 // 今の形は `…/nenwa' hook codex …`（Windows は `nenwa.exe"`）、TS 版の古い形は `…/cli.js' hook codex …`。
 fn is_our_command(c: &str) -> bool {
-    for agent in ["codex", "cursor", "gemini", "qwen"] {
+    for agent in ["codex", "cursor", "gemini", "qwen", "antigravity"] {
         let needle = format!(" hook {agent} ");
         for (i, _) in c.match_indices(&needle) {
             let before = &c[..i];
@@ -469,6 +469,64 @@ fn setup_pi(remove: bool) -> Option<SetupResult> {
     Some(SetupResult { agent: "pi", files: vec![file.display().to_string()] })
 }
 
+// ---- Antigravity CLI（Gemini CLI の後継。フックの形は別物） ----
+// 設定は ~/.gemini/config/ の mcp_config.json と hooks.json。hooks.json はいちばん上が「フックの名前」。
+// SessionEnd と入力時のイベントはないので、モデルを呼ぶ前（PreInvocation）に差し込む。
+const ANTIGRAVITY_EVENTS: [(&str, &str); 3] = [("SessionStart", "session-start"), ("PreInvocation", "post-tool-use"), ("Stop", "stop")];
+
+fn antigravity_dir() -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("NENWA_ANTIGRAVITY_DIR").filter(|d| !d.is_empty()) {
+        let d = PathBuf::from(d);
+        return d.exists().then_some(d);
+    }
+    // CLI を入れると ~/.gemini/antigravity-cli ができる（デスクトップ版だけのときは触らない）
+    let gemini = os::home_dir().join(".gemini");
+    (gemini.join("antigravity-cli").exists() || gemini.join("config").exists()).then(|| gemini.join("config"))
+}
+
+fn setup_antigravity(remove: bool) -> Option<SetupResult> {
+    let dir = antigravity_dir()?;
+    let read = |file: &Path| -> Option<Map<String, Value>> {
+        match std::fs::read_to_string(file) {
+            Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
+                Ok(Value::Object(m)) => Some(m),
+                _ => {
+                    eprintln!("antigravity: {} を読めなかったので、そのままにしました", file.display());
+                    None
+                }
+            },
+            _ => Some(Map::new()),
+        }
+    };
+    let (mcp_file, hooks_file) = (dir.join("mcp_config.json"), dir.join("hooks.json"));
+    let (mut mcp, mut hooks) = (read(&mcp_file)?, read(&hooks_file)?);
+    let (mcp_before, hooks_before) = (mcp.clone(), hooks.clone());
+    if remove {
+        if let Some(servers) = mcp.get_mut("mcpServers").and_then(Value::as_object_mut) {
+            servers.remove("nenwa");
+        }
+        hooks.remove("nenwa");
+    } else {
+        ensure_obj(&mut mcp, "mcpServers")
+            .insert("nenwa".into(), json!({ "command": exe().to_string_lossy(), "args": ["mcp", "--agent", "antigravity"] }));
+        let ours: Map<String, Value> = ANTIGRAVITY_EVENTS
+            .iter()
+            .map(|(event, name)| {
+                (event.to_string(), json!([{ "type": "command", "command": hook_command("antigravity", name), "timeout": 10 }]))
+            })
+            .collect();
+        hooks.insert("nenwa".into(), Value::Object(ours));
+    }
+    let _ = std::fs::create_dir_all(&dir);
+    for (file, data, before) in [(&mcp_file, &mcp, &mcp_before), (&hooks_file, &hooks, &hooks_before)] {
+        if data != before {
+            backup(file);
+            write_json(file, data);
+        }
+    }
+    Some(SetupResult { agent: "antigravity", files: vec![mcp_file.display().to_string(), hooks_file.display().to_string()] })
+}
+
 pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
     [
         setup_codex(remove),
@@ -478,6 +536,7 @@ pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
         setup_opencode(remove),
         setup_copilot(remove),
         setup_pi(remove),
+        setup_antigravity(remove),
     ]
     .into_iter()
     .flatten()

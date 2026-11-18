@@ -2,7 +2,7 @@
 
 [English](README.md) | [日本語](README.ja.md) | 简体中文
 
-一个小工具，让你自己的智能体（Claude Code、Codex、Cursor、OpenCode、Gemini CLI、Qwen Code、Grok Bot）之间可以互相发消息。比如你对 Claude Code 说"去问问 Codex 这个 API 的返回类型"，问题就会送到 Codex 的对话里，回答再回到 Claude Code。它只是一个可执行文件（不需要 Node.js），可在 macOS、Linux 和 Windows 上运行。
+一个小工具，让你自己的智能体（Claude Code、Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code、Grok Bot）之间可以互相发消息。比如你对 Claude Code 说"去问问 Codex 这个 API 的返回类型"，问题就会送到 Codex 的对话里，回答再回到 Claude Code。它只是一个可执行文件（不需要 Node.js），可在 macOS、Linux 和 Windows 上运行。
 
 名字来自"念话"（nenwa）：与远方的同伴用心灵对话，是动漫里常见的能力。
 
@@ -24,7 +24,7 @@ irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1 | iex
 
 - 创建一个只在这台电脑内部的网络（不与外部连接）
 - 设置登录时启动守护进程（macOS 用 launchd，Linux 用 `systemd --user`，Windows 用任务计划程序）
-- 注册到已安装的智能体：Claude Code（MCP）、Codex（MCP 和钩子）、Cursor（MCP 和钩子）、Gemini CLI 和 Qwen Code（MCP 和钩子）、OpenCode（MCP 和插件）。修改前的配置文件会保留为 `.bak-nenwa`
+- 注册到已安装的智能体：Claude Code（MCP）、Codex（MCP 和钩子）、Cursor（MCP 和钩子）、Gemini CLI 和 Qwen Code（MCP 和钩子）、OpenCode（MCP 和插件）、Pi（扩展）、Copilot CLI 和 Antigravity CLI（MCP 和钩子）。修改前的配置文件会保留为 `.bak-nenwa`
 
 之后：
 
@@ -93,15 +93,18 @@ Claude Code 中出现两个工具（对于 Grok Bot 等拥有收件箱的一方�
 | `send_message(to, message, reply_to?)` | 发送。结果为 `delivered` / `inbox` / `queued` / `no_session` / `refused` / `rate_limited` |
 | `check_inbox(wait_secs?)` | 读取收件箱。为空时最多可等待 50 秒 |
 
-## Codex、Cursor、OpenCode、Gemini CLI 和 Qwen Code
+## Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI 和 Qwen Code
 
-`install` 也会为 Codex（`~/.codex/config.toml` 和 `hooks.json`）和 Cursor（`~/.cursor/mcp.json` 和 `hooks.json`）、Gemini CLI（`~/.gemini/settings.json`）、Qwen Code（`~/.qwen/settings.json`）添加 MCP 服务器和钩子。OpenCode 没有命令式钩子，所以会在 `~/.config/opencode/opencode.json` 中添加 MCP 服务器，并放置一个起同样作用的小插件（`plugins/nenwa.js`）。只处理配置文件夹存在的智能体。修改前的文件保留为 `.bak-nenwa`，不会动其他钩子和 MCP 服务器。可以用 `nenwa setup --remove` 移除。
+`install` 也会为 Codex（`~/.codex/config.toml` 和 `hooks.json`）和 Cursor（`~/.cursor/mcp.json` 和 `hooks.json`）、Gemini CLI（`~/.gemini/settings.json`）、Qwen Code（`~/.qwen/settings.json`）添加 MCP 服务器和钩子。OpenCode 没有命令式钩子，所以会在 `~/.config/opencode/opencode.json` 中添加 MCP 服务器，并放置一个起同样作用的小插件（`plugins/nenwa.js`）。Pi 也没有 MCP，所以放置一个扩展（`~/.pi/agent/extensions/nenwa.ts`），同时提供工具（`nenwa_list_team`、`nenwa_send_message`）和接收消息。Copilot CLI 使用 `~/.copilot/mcp-config.json` 和 `hooks/nenwa.json`；Antigravity CLI 使用 `~/.gemini/config/mcp_config.json` 和 `hooks.json`。只处理配置文件夹存在的智能体。修改前的文件保留为 `.bak-nenwa`，不会动其他钩子和 MCP 服务器。可以用 `nenwa setup --remove` 移除。
 
 | | 确定地址 | 空闲时收到 | 工作中收到 |
 |---|---|---|---|
 | Codex | `SessionStart` 钩子 | 用 `codex queue --thread <ID>` 放入对话（在那里开始工作） | 相同。失败时放入收件箱，在 `PostToolUse` 插入，或在 `Stop` 时让它继续 |
 | Cursor | `sessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `postToolUse` 插入，并在 `stop` 时用 `followup_message` 让它继续 |
 | OpenCode | 插件（对话创建时、输入时） | 发送到 OpenCode 的本地服务器（`POST /session/<ID>/prompt_async`），放入对话（在那里开始工作） | 相同。失败时放入收件箱，附加到下一次工具结果中，或在回答结束时让它继续 |
+| Pi | 扩展（对话开始时） | 扩展一直在等待消息，收到后放入对话（在那里开始工作）。发送方看到的是 `inbox` | 相同（在当前步骤之后放入） |
+| Copilot CLI | `sessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `postToolUse` 插入，并在 `agentStop` 时用 `decision: "block"` 让它继续 |
+| Antigravity CLI | `SessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `PreInvocation`（每次调用模型之前）用 `injectSteps` 插入，并在 `Stop` 时用 `decision: "continue"` 让它继续 |
 | Gemini CLI | `SessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `BeforeAgent` 和 `AfterTool` 插入，并在 `AfterAgent` 时用 `decision: "deny"` 让它继续 |
 | Qwen Code | `SessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `UserPromptSubmit` 和 `PostToolUse` 插入，并在 `Stop` 时用 `decision: "block"` 让它继续 |
 
@@ -109,7 +112,8 @@ Claude Code 中出现两个工具（对于 Grok Bot 等拥有收件箱的一方�
 - 钩子和 MCP 服务器（`mcp --agent <名称>`）会把启动自己的父进程告诉守护进程。守护进程把两次钩子调用共有的父进程记为该智能体本身。通过 MCP 发送时，发送者就是由同一个智能体进程启动的对话。在还不知道该进程时，会选择"正在工作、文件夹匹配、最近活动过"的对话。
 - 智能体进程已消失的对话会从列表中移除（向它发送会得到 `no_session`）。
 - OpenCode 已用 1.1.8 的 `opencode serve` 确认：注册、向空闲对话投递、进程消失后返回 `no_session`。对话开始时不会告知它自己的地址（否则仅此就会触发一次回答）。只接受本机（127.0.0.1）的服务器地址。
-- Gemini CLI 和 Qwen Code 的支持是按官方文档实现的，只用伪造的输入测试过，尚未在真实工具上确认。如果 `settings.json` 无法解析（例如带注释），则保持原样不修改。
+- Pi 已用 0.82.1 的 RPC 模式确认：扩展能加载、对话出现在列表中、消息能让空闲对话开始工作、工具调用的发送者是该对话。
+- Gemini CLI、Antigravity CLI、Qwen Code 和 Copilot CLI 的支持是按官方文档实现的，只用伪造的输入测试过，尚未在真实工具上确认。如果 `settings.json` 无法解析（例如带注释），则保持原样不修改。
 - Codex 在信任钩子之前不会运行它们。`install` 之后，在新打开的会话中打开 `/hooks`，信任 nenwa 的钩子。
 - Cursor 的 `beforeSubmitPrompt` 无法向对话添加文字，所以不在那里取出消息。
 - 如果守护进程没有运行，钩子会不输出任何内容直接结束（不会阻塞智能体）。
@@ -183,7 +187,7 @@ Muse 可以使用 `list_team` / `send_message` / `check_inbox`。发件人始终
 | `wake/<名称>.json` | 唤醒收件箱的 webhook 的 URL 和密钥（权限 600） |
 | `http/keys.json` | `nenwa muse` 密钥的 SHA-256（权限 600。不保存密钥本身） |
 | `http/enabled` | HTTP 入口打开期间存在：端口、关闭时间、是否使用 Funnel（守护进程重启后会重新打开） |
-| `agents.json` | 通过钩子看到的 Codex / Cursor / OpenCode / Gemini CLI / Qwen Code 对话（一天没看到就遗忘） |
+| `agents.json` | 通过钩子看到的对话（Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code）（一天没看到就遗忘） |
 | `peers.json` | 连接过的电脑的名称和地址（每次启动时重新连接） |
 | `sock` | 守护进程的 unix 套接字 |
 | `daemon.log` | 日志 |
@@ -213,7 +217,7 @@ GitHub Actions（`.github/workflows/ci.yml`）在 Linux 和 Windows 上运行 fm
 
 ## 舍弃的功能
 
-Claude Code、Codex、Cursor、OpenCode、Gemini CLI、Qwen Code、Grok Bot 以外的智能体（Copilot CLI、Kimi CLI 等也可以用 `mcp --as <名称>` 的收件箱以同样方式连接；只有在它们自己调用 check_inbox 时才会收到消息）、带签名的成员名单、账户登录、文件附件、审批弹窗（`ask_user`）、菜单栏显示、自建 relay。
+上面列出的以外的智能体（Kimi CLI、Kiro CLI 等也可以用 `mcp --as <名称>` 的收件箱以同样方式连接；只有在它们自己调用 check_inbox 时才会收到消息）、带签名的成员名单、账户登录、文件附件、审批弹窗（`ask_user`）、菜单栏显示、自建 relay。
 
 ## 注意事项
 
