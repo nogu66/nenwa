@@ -751,6 +751,74 @@ fn codex_codex_queueで会話に入れる_失敗したらフックで差し込�
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(CODEX_ADDR)));
 }
 
+// 偽の Codex 本体（sh）。フックと MCP サーバーをその子として動かし、stdin が閉じたら終わる。
+struct FakeAgent {
+    child: std::process::Child,
+    lines: std::io::Lines<BufReader<std::process::ChildStdout>>,
+    out: PathBuf,
+}
+
+impl FakeAgent {
+    fn start(c: &Ctx, id: &str, to: &str) -> FakeAgent {
+        let dir = c.root.join(format!("agent-{id}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (req, out) = (dir.join("req"), dir.join("out"));
+        let calls = [
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": to, "message": id } } }),
+        ];
+        std::fs::write(&req, calls.iter().map(|v| format!("{v}\n")).collect::<String>()).unwrap();
+        let script = r#"printf '%s' "$2" | "$1" hook codex session-start >/dev/null
+printf '%s' "$2" | "$1" hook codex post-tool-use >/dev/null
+echo ready
+read _ || exit 0
+NENWA_AGENT=codex "$1" mcp < "$3" > "$4"
+echo sent
+read _"#;
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script, "sh", CLI, &json!({ "session_id": id, "cwd": "/work/web" }).to_string()]).arg(&req).arg(&out);
+        for (k, v) in &c.alice.env {
+            cmd.env(k, v);
+        }
+        let mut child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+        let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+        assert_eq!(lines.next().unwrap().unwrap(), "ready");
+        FakeAgent { child, lines, out }
+    }
+    // MCP から 1 通送り、デーモンが決めた送り主を返す
+    fn send(&mut self) -> String {
+        writeln!(self.child.stdin.as_mut().unwrap()).unwrap();
+        assert_eq!(self.lines.next().unwrap().unwrap(), "sent");
+        let text = std::fs::read_to_string(&self.out).unwrap();
+        let replies: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let res: Value = serde_json::from_str(by_id(&replies, 2)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        res["from"].as_str().unwrap().to_string()
+    }
+    fn close(mut self) {
+        drop(self.child.stdin.take());
+        self.child.wait().unwrap();
+    }
+}
+
+fn 同じフォルダの会話が2つあっても_送り主は呼んだ本体で決まり_本体が消えた会話は一覧から外れる(
+    c: &Ctx,
+) {
+    if cfg!(windows) {
+        return; // sh を使うので unix だけ
+    }
+    let (first, second) = ("alice/web-aaa1@alice-mac", "alice/web-aaa2@alice-mac");
+    let mut a = FakeAgent::start(c, "019a2b3c-0000-7000-8000-00000000aaa1", "bob/api-bbbb@bob-mac");
+    // あとから開いた会話。フォルダも状態も同じなので、本体を見なければこちらが選ばれる。
+    let b = FakeAgent::start(c, "019a2b3c-0000-7000-8000-00000000aaa2", "bob/api-bbbb@bob-mac");
+    assert_eq!(a.send(), first);
+
+    a.close();
+    until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(first) && o.contains(second)));
+    assert_eq!(cli_json(&c.bob, &["send", first, "もういない"])["state"], "no_session");
+    b.close();
+    until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(second)));
+}
+
 fn フック_デーモンがなくても何も出さずに正常終了する(c: &Ctx) {
     let lonely = c.alice.with(&[("NENWA_HOME", &c.root.join("nobody").display().to_string())]);
     assert_eq!(hook_call(&lonely, "codex", "post-tool-use", json!({ "session_id": CODEX_ID })), None);
@@ -900,6 +968,10 @@ fn main() {
             cursor_mcp_agent_cursorから送ると_そのセッションが送り主になる,
         ),
         ("Codex: codex queue で会話に入れる。失敗したらフックで差し込む", codex_codex_queueで会話に入れる_失敗したらフックで差し込む),
+        (
+            "Codex: 同じフォルダの会話が 2 つあっても、送り主は呼んだ本体で決まる。本体が消えた会話は一覧から外れる",
+            同じフォルダの会話が2つあっても_送り主は呼んだ本体で決まり_本体が消えた会話は一覧から外れる,
+        ),
         ("フック: デーモンがなくても何も出さずに正常終了する", フック_デーモンがなくても何も出さずに正常終了する),
         (
             "setup: Codex と Cursor にほかの設定を残したまま足し、--remove で元に戻す",

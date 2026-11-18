@@ -4,6 +4,18 @@
 // - フックのコマンドの囲み
 // - 手元の通信の場所（unix ソケットか名前付きパイプ）
 
+// 自分の親、その親…と上へたどった番号の並び（近い順）。フックや MCP サーバーが、どのエージェントから起動されたかを伝えるのに使う。
+pub fn ancestors() -> Vec<i64> {
+    let mut list = vec![];
+    let mut pid = own_parent_pid();
+    while pid > 1 && list.len() < 8 && !list.contains(&pid) {
+        list.push(pid);
+        let Some(parent) = parent_pid(pid) else { break };
+        pid = parent;
+    }
+    list
+}
+
 #[cfg(unix)]
 mod unix;
 #[cfg(unix)]

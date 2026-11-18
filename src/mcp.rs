@@ -64,6 +64,8 @@ impl Server {
         if !self.agent.is_empty() {
             m.insert("agent".into(), json!(self.agent));
             m.insert("cwd".into(), json!(std::env::current_dir().map(|d| d.display().to_string()).unwrap_or_default()));
+            // MCP サーバーはエージェント本体の子なので、親の並びからどの会話かが分かる
+            m.insert("ancestors".into(), json!(crate::os::ancestors()));
         } else if !self.as_.is_empty() {
             m.insert("as".into(), json!(self.as_));
         } else {

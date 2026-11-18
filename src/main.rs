@@ -102,8 +102,13 @@ fn hook(agent: Option<&String>, event: Option<&String>) -> ! {
     });
     let raw = rx.recv_timeout(Duration::from_secs(3)).unwrap_or_default();
     let input: Value = serde_json::from_str(if raw.trim().is_empty() { "{}" } else { &raw }).unwrap_or(json!({}));
-    let r =
-        req(&[("op", Some(json!("hook"))), ("agent", agent.map(|a| json!(a))), ("event", event.map(|e| json!(e))), ("input", Some(input))]);
+    let r = req(&[
+        ("op", Some(json!("hook"))),
+        ("agent", agent.map(|a| json!(a))),
+        ("event", event.map(|e| json!(e))),
+        ("input", Some(input)),
+        ("ancestors", Some(json!(os::ancestors()))),
+    ]);
     if let Some(res) = try_request(&r)
         && res["ok"] == true
         && !res["result"].is_null()

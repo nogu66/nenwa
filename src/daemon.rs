@@ -76,6 +76,16 @@ pub struct Agent {
     pub status: String,
     #[serde(default)]
     pub seen: u64,
+    // エージェント本体のプロセス（0 はまだ分からない）。消えたら、その会話は閉じたものとして扱う。
+    #[serde(default)]
+    pub pid: i64,
+    // 直前のフックの親の並び。次のフックと共通する最初のものが本体（間のシェルは毎回変わる）。
+    #[serde(default)]
+    pub anc: Vec<i64>,
+}
+
+fn pids(v: &Value) -> Vec<i64> {
+    v.as_array().map(|a| a.iter().filter_map(Value::as_i64).filter(|p| *p > 1).take(8).collect()).unwrap_or_default()
 }
 
 // つながった（つながっていた）ほかのパソコン
@@ -280,7 +290,7 @@ impl Daemon {
     // フックが呼ばれるたびにセッションを覚える。1 日見えなければ忘れる。
     fn live_agents<'a>(&self, st: &'a St) -> impl Iterator<Item = &'a Agent> {
         let now = now_ms();
-        st.agents.iter().map(|(_, a)| a).filter(move |a| now.saturating_sub(a.seen) < DAY)
+        st.agents.iter().map(|(_, a)| a).filter(move |a| now.saturating_sub(a.seen) < DAY && (a.pid == 0 || os::alive(a.pid)))
     }
 
     fn save_agents(st: &St) {
@@ -288,7 +298,7 @@ impl Daemon {
         write_json_private(&state::agents_file(), &m);
     }
 
-    fn touch_agent(&self, st: &mut St, agent: &str, input: &Value, status: &str) -> Option<String> {
+    fn touch_agent(&self, st: &mut St, agent: &str, input: &Value, status: &str, anc: Vec<i64>) -> Option<String> {
         let mut id = js_str(&input["session_id"]);
         if id.is_empty() {
             id = js_str(&input["conversation_id"]);
@@ -306,12 +316,27 @@ impl Daemon {
         let tail: String = alnum[alnum.len().saturating_sub(4)..].iter().collect::<String>().to_lowercase();
         if !st.agents.iter().any(|(k, _)| *k == key) {
             let label = format!("{}-{tail}", slug(&basename(&cwd)));
-            st.agents.push((key.clone(), Agent { agent: agent.into(), id, cwd: cwd.clone(), label, status: String::new(), seen: 0 }));
+            st.agents.push((
+                key.clone(),
+                Agent { agent: agent.into(), id, cwd: cwd.clone(), label, status: String::new(), seen: 0, pid: 0, anc: vec![] },
+            ));
         }
         let now = now_ms();
         let a = &mut st.agents.iter_mut().find(|(k, _)| *k == key)?.1;
         a.status = status.into();
         a.seen = now;
+        // 本体が入れ替わった（同じ会話を開き直した）ら、調べ直す
+        if a.pid != 0 && !anc.contains(&a.pid) && !os::alive(a.pid) {
+            a.pid = 0;
+        }
+        if a.pid == 0
+            && let Some(p) = anc.iter().find(|p| a.anc.contains(p))
+        {
+            a.pid = *p;
+        }
+        if !anc.is_empty() {
+            a.anc = anc;
+        }
         if a.cwd.is_empty() && !cwd.is_empty() {
             a.cwd = cwd;
         }
@@ -322,8 +347,13 @@ impl Daemon {
     }
 
     // MCP サーバーはどの会話から呼ばれたかを知らない。作業中（ツールを呼べるのは作業中）で、フォルダが合い、最近動いたものを選ぶ。
-    fn resolve_agent(&self, st: &St, agent: &str, cwd: Option<&str>) -> Result<Agent> {
-        let score = |a: &Agent| (if a.status == "busy" { 2 } else { 0 }) + (if cwd.is_some_and(|c| a.cwd == c) { 1 } else { 0 });
+    // 呼んだ MCP サーバーの親に本体がいる会話があれば、それに決まる。
+    fn resolve_agent(&self, st: &St, agent: &str, cwd: Option<&str>, anc: &[i64]) -> Result<Agent> {
+        let score = |a: &Agent| {
+            (if a.pid != 0 && anc.contains(&a.pid) { 4 } else { 0 })
+                + (if a.status == "busy" { 2 } else { 0 })
+                + (if cwd.is_some_and(|c| a.cwd == c) { 1 } else { 0 })
+        };
         let mut list: Vec<&Agent> = self.live_agents(st).filter(|a| a.agent == agent && a.status != "offline").collect();
         list.sort_by(|x, y| score(y).cmp(&score(x)).then(y.seen.cmp(&x.seen)));
         list.first().map(|a| (*a).clone()).ok_or_else(|| {
@@ -374,7 +404,9 @@ impl Daemon {
             "session-end" => "offline",
             _ => "busy",
         };
-        let Some(label) = self.touch_agent(&mut self.lock(), agent, &req["input"], status) else { return Ok(Value::Null) };
+        let Some(label) = self.touch_agent(&mut self.lock(), agent, &req["input"], status, pids(&req["ancestors"])) else {
+            return Ok(Value::Null);
+        };
         if event == "session-end" {
             return Ok(Value::Null);
         }
@@ -612,7 +644,7 @@ impl Daemon {
             let mut st = self.lock();
             // 送り主: Codex / Cursor のセッション > 受信箱の名前（Grok Bot など）> Claude Code のセッション > ターミナル
             let hooked = match s(req, "agent") {
-                Some(kind) => Some(self.resolve_agent(&st, kind, s(req, "cwd"))?),
+                Some(kind) => Some(self.resolve_agent(&st, kind, s(req, "cwd"), &pids(&req["ancestors"]))?),
                 None => None,
             };
             let as_ = s(req, "as");
@@ -683,7 +715,7 @@ impl Daemon {
                 json!({ "address": self.own(name) })
             }
             "inbox" if s(req, "agent").is_some() => {
-                let a = self.resolve_agent(&self.lock(), s(req, "agent").unwrap_or(""), s(req, "cwd"))?;
+                let a = self.resolve_agent(&self.lock(), s(req, "agent").unwrap_or(""), s(req, "cwd"), &pids(&req["ancestors"]))?;
                 json!({ "address": self.own(&a.label), "messages": self.take_inbox(&a.label, num(&req["wait"]), false).await? })
             }
             "inbox" => {
