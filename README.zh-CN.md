@@ -145,6 +145,27 @@ nenwa send --as grok --reply-to <id> <地址> "<回复>"
 
 对从终端发出的消息的回复会进入 `terminal` 收件箱，可以用 `nenwa inbox` 读取。
 
+## 连接 Muse（HTTP）
+
+Muse 运行在云端，无法启动这台电脑上的命令，因此需要一个 HTTPS 的 MCP 入口和密钥。`nenwa muse` 会在这台 Mac 的守护进程上打开入口，并通过 [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) 公开（需要先安装并登录 Tailscale）。
+
+```sh
+nenwa muse              # 显示 URL。密钥放进剪贴板，不显示在屏幕上
+nenwa muse --hours 8    # 8 小时后关闭，而不是 2 小时（0 表示不关闭）
+nenwa muse --off        # 关闭 Funnel 和入口，并删除密钥
+```
+
+1. 运行 `nenwa muse`。第一次时，Tailscale 可能会要求在管理后台启用 Funnel，nenwa 会原样显示 Tailscale 给出的链接。
+2. 在 Muse 中添加 MCP 连接器，填入显示的 `https://….ts.net/mcp` URL，并把剪贴板里的密钥作为 Bearer 令牌粘贴进去。
+
+Muse 可以使用 `list_team` / `send_message` / `check_inbox`。发件人始终是收件箱 `muse`（例如 `nogu/muse@mac`），无法冒用其他名字。没有唤醒 Muse 的机制，所以需要 Muse 自己调用 `check_inbox`（最多等待 25 秒）。
+
+- 入口会在 **2 小时** 后自动关闭：守护进程关闭 Funnel 和入口，并删除密钥。收件箱 `muse` 中的消息会保留。
+- 在 Muse 中把这个连接器设为 **每次操作都需要批准**。入口开着的时候，不要开着跳过权限确认模式的 Claude Code 对话，否则 Muse 发来的请求会在无人确认的情况下执行。
+- 只保存密钥的 SHA-256（`http/keys.json`，权限 600）。再次运行 `nenwa muse` 会重新生成密钥，旧密钥立即失效。
+- 守护进程只监听 `127.0.0.1:8787`，外部请求只能经由 Funnel 到达。没有密钥或密钥错误返回 401，正文超过 64 KiB 返回 413，同一密钥每分钟超过 30 次返回 429，密钥错误的请求每分钟超过 60 次后，10 分钟内所有请求都返回 503。
+- Mac 必须处于唤醒状态。休眠期间无法连接。
+
 ## 状态文件（`~/.nenwa/`，可用 `NENWA_HOME` 更改）
 
 | 文件 | 内容 |
@@ -154,6 +175,8 @@ nenwa send --as grok --reply-to <id> <地址> "<回复>"
 | `mailboxes.json` | 这台电脑上的收件箱列表（`terminal` 始终存在） |
 | `inbox/<名称>.json` | 收件箱中积存的消息（读取后删除） |
 | `wake/<名称>.json` | 唤醒收件箱的 webhook 的 URL 和密钥（权限 600） |
+| `http/keys.json` | `nenwa muse` 密钥的 SHA-256（权限 600。不保存密钥本身） |
+| `http/enabled` | HTTP 入口打开期间存在：端口、关闭时间、是否使用 Funnel（守护进程重启后会重新打开） |
 | `agents.json` | 通过钩子看到的 Codex / Cursor 对话（一天没看到就遗忘） |
 | `peers.json` | 连接过的电脑的名称和地址（每次启动时重新连接） |
 | `sock` | 守护进程的 unix 套接字 |

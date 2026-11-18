@@ -70,7 +70,17 @@ impl Home {
     fn command(&self, args: &[&str]) -> Command {
         let mut c = Command::new(CLI);
         c.args(args);
-        for k in ["NENWA_AS", "NENWA_AGENT", "NENWA_WAKE_KEY", "NENWA_CODEX_DIR", "NENWA_CURSOR_DIR", "XDG_CONFIG_HOME"] {
+        for k in [
+            "NENWA_AS",
+            "NENWA_AGENT",
+            "NENWA_WAKE_KEY",
+            "NENWA_CODEX_DIR",
+            "NENWA_CURSOR_DIR",
+            "XDG_CONFIG_HOME",
+            "NENWA_HTTP_PORT",
+            "NENWA_HTTP_TTL_SECS",
+            "NENWA_KEY_FILE",
+        ] {
             c.env_remove(k);
         }
         for (k, v) in &self.env {
@@ -90,6 +100,15 @@ struct Ctx {
     bob: Home,
     bob_session: Session,
     daemons: Mutex<HashMap<&'static str, Child>>,
+    muse: Mutex<Option<Muse>>,
+}
+
+// nenwa muse で開いた HTTP の入り口
+#[derive(Clone)]
+struct Muse {
+    env: Home,
+    url: String,
+    key: String,
 }
 
 impl Ctx {
@@ -300,7 +319,7 @@ fn before() -> Ctx {
     cli(&bob.with(&[("NENWA_TEST_NO_INSTALL", "1")]), &["join", &code, "--person", "bob", "--machine", "bob-mac"]).unwrap();
     let bob_session = fake_session(&bob, "api", "bbbb1111-0000-0000-0000-000000000000");
     daemons.insert("bob", start_daemon(&bob));
-    Ctx { root, team_key, fake_codex, alice, bob, bob_session, daemons: Mutex::new(daemons) }
+    Ctx { root, team_key, fake_codex, alice, bob, bob_session, daemons: Mutex::new(daemons), muse: Mutex::new(None) }
 }
 
 fn after(ctx: Ctx) {
@@ -427,6 +446,184 @@ fn mcp_nenwa_asを付けたときだけcheck_inboxが出る(c: &Ctx) {
     );
     let text = by_id(&out, 3)["result"]["content"][0]["text"].as_str().unwrap().to_string();
     assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\nMCP で読んで\n</nenwa-message>"#).is_match(&text), "{text}");
+}
+
+// ---- HTTP の入り口（nenwa muse）。Tailscale とクリップボードは使わず、鍵はファイルで受け取る ----
+
+fn free_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+// nenwa muse を実行して、表示された URL と書き出された鍵を返す
+fn muse_on(c: &Ctx, extra: &[(&str, &str)]) -> Muse {
+    let key_file = c.root.join(format!("muse-key-{}", rand_hex(3)));
+    let port = free_port().to_string();
+    let k = key_file.display().to_string();
+    let mut vars = vec![("NENWA_TEST_NO_TAILSCALE", "1"), ("NENWA_HTTP_PORT", port.as_str()), ("NENWA_KEY_FILE", k.as_str())];
+    vars.extend_from_slice(extra);
+    let env = c.alice.with(&vars);
+    let out = cli(&env, &["muse"]).unwrap();
+    let url = re(r"http://127\.0\.0\.1:\d+/mcp").find(&out).unwrap().as_str().to_string();
+    let key = std::fs::read_to_string(&key_file).unwrap().trim().to_string();
+    std::fs::remove_file(&key_file).unwrap();
+    assert!(!out.contains(&key), "鍵は画面に出さない");
+    assert!(out.contains("alice/muse@alice-mac"), "{out}");
+    let m = Muse { env, url, key };
+    *c.muse.lock().unwrap() = Some(m.clone());
+    m
+}
+
+fn muse(c: &Ctx) -> Muse {
+    c.muse.lock().unwrap().clone().unwrap()
+}
+
+fn agent() -> ureq::Agent {
+    ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(40))).build().into()
+}
+
+// POST して (状態, 本文)。つながらなければ Err
+fn post(url: &str, key: Option<&str>, body: &str) -> Result<(u16, String), String> {
+    let mut r = agent().post(url).header("Content-Type", "application/json").header("Accept", "application/json, text/event-stream");
+    if let Some(k) = key {
+        r = r.header("Authorization", &format!("Bearer {k}"));
+    }
+    let mut res = r.send(body).map_err(|e| e.to_string())?;
+    let status = res.status().as_u16();
+    Ok((status, res.body_mut().read_to_string().unwrap_or_default()))
+}
+
+fn rpc(m: &Muse, id: i64, method: &str, params: Value) -> Value {
+    let (status, body) =
+        post(&m.url, Some(&m.key), &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }).to_string()).unwrap();
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["id"], id);
+    v
+}
+
+fn tool(m: &Muse, id: i64, name: &str, args: Value) -> String {
+    let v = rpc(m, id, "tools/call", json!({ "name": name, "arguments": args }));
+    v["result"]["content"][0]["text"].as_str().unwrap().to_string()
+}
+
+fn http_muse_鍵なしと違う鍵は401_鍵はハッシュだけ残す(c: &Ctx) {
+    until(|| who_has(&c.alice, "bob/api-bbbb@bob-mac").then_some(())); // 絞り込んで動かしたときのため
+    let m = muse_on(c, &[]);
+    let keys = c.alice.home.join("http").join("keys.json");
+    let saved = std::fs::read_to_string(&keys).unwrap();
+    assert!(!saved.contains(&m.key), "鍵そのものは残さない");
+    assert!(saved.contains("sha256"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&keys).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    assert!(c.alice.home.join("http").join("enabled").exists());
+    let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
+    assert_eq!(post(&m.url, None, &ping).unwrap().0, 401);
+    assert_eq!(post(&m.url, Some("wrong-key"), &ping).unwrap().0, 401);
+    assert_eq!(agent().get(&m.url).call().unwrap().status().as_u16(), 405);
+    assert_eq!(post(&m.url.replace("/mcp", "/other"), Some(&m.key), &ping).unwrap().0, 404);
+}
+
+fn http_initializeとtools_listで3つのツール_通知は202(c: &Ctx) {
+    let m = muse(c);
+    let init = rpc(&m, 1, "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test" } }));
+    assert_eq!(init["result"]["serverInfo"]["name"], "nenwa");
+    let (status, body) =
+        post(&m.url, Some(&m.key), &json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }).to_string()).unwrap();
+    assert_eq!((status, body.as_str()), (202, ""));
+    let tools = rpc(&m, 2, "tools/list", json!({}));
+    let names: Vec<&str> = tools["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["list_team", "send_message", "check_inbox"]);
+    assert!(tool(&m, 3, "list_team", json!({})).contains("bob/api-bbbb@bob-mac"));
+}
+
+fn http_museからのsend_messageは_送り主がmuseで届く(c: &Ctx) {
+    let m = muse(c);
+    let before = c.bob_session.len();
+    // 別の名前を名乗ろうとしても muse のまま
+    let text = tool(&m, 4, "send_message", json!({ "to": "bob/api-bbbb@bob-mac", "message": "Muse から", "as": "grok" }));
+    let res: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(res["from"], "alice/muse@alice-mac");
+    assert_eq!(res["state"], "delivered");
+    let line = until(|| c.bob_session.after(before));
+    let content = line["message"]["content"].as_str().unwrap();
+    assert!(
+        re(r#"<nenwa-message from="alice/muse@alice-mac" id="[0-9a-f-]+">\nMuse から\n</nenwa-message>"#).is_match(content),
+        "{content}"
+    );
+}
+
+fn http_返事をcheck_inboxで読める(c: &Ctx) {
+    let m = muse(c);
+    let sent = cli_json(&c.bob, &["send", "alice/muse@alice-mac", "Muse さんへの返事"]);
+    assert_eq!(sent["state"], "inbox");
+    let text = tool(&m, 5, "check_inbox", json!({ "wait_secs": 5 }));
+    assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\nMuse さんへの返事\n</nenwa-message>"#).is_match(&text), "{text}");
+    // 空のときは待って、届いたら返す（上限は 25 秒）
+    let mm = m.clone();
+    let waiting = std::thread::spawn(move || tool(&mm, 6, "check_inbox", json!({ "wait_secs": 999 })));
+    sleep(500);
+    cli(&c.bob, &["send", "alice/muse@alice-mac", "待っていた分"]).unwrap();
+    assert!(waiting.join().unwrap().contains("待っていた分"));
+}
+
+fn http_本文が大きすぎると413_続けて送ると429(c: &Ctx) {
+    let m = muse(c);
+    let big = json!({ "jsonrpc": "2.0", "id": 7, "method": "ping", "params": { "pad": "x".repeat(70 * 1024) } }).to_string();
+    assert_eq!(post(&m.url, Some(&m.key), &big).unwrap().0, 413);
+    let ping = json!({ "jsonrpc": "2.0", "id": 8, "method": "ping" }).to_string();
+    let statuses: Vec<u16> = (0..31).map(|_| post(&m.url, Some(&m.key), &ping).unwrap().0).collect();
+    assert_eq!(statuses.last(), Some(&429), "{statuses:?}");
+}
+
+fn http_鍵の合わない要求が続くと503(c: &Ctx) {
+    let m = muse(c);
+    let ping = json!({ "jsonrpc": "2.0", "id": 9, "method": "ping" }).to_string();
+    let statuses: Vec<u16> = (0..62).map(|_| post(&m.url, Some("guess"), &ping).unwrap().0).collect();
+    assert_eq!(statuses.last(), Some(&503), "{statuses:?}");
+    assert_eq!(post(&m.url, Some(&m.key), &ping).unwrap().0, 503, "正しい鍵でも止まっている");
+}
+
+fn http_offのあとは使えない_受信箱の中身は残る(c: &Ctx) {
+    let m = muse(c);
+    cli(&c.bob, &["send", "alice/muse@alice-mac", "閉じても残る"]).unwrap();
+    let out = cli(&m.env, &["muse", "--off"]).unwrap();
+    assert!(out.contains("閉じました"), "{out}");
+    let ping = json!({ "jsonrpc": "2.0", "id": 10, "method": "ping" }).to_string();
+    // 待ち受けは閉じている（前のつながりが残っていれば 401）
+    match post(&m.url, Some(&m.key), &ping) {
+        Err(_) => {}
+        Ok((status, _)) => assert_eq!(status, 401),
+    }
+    assert!(!c.alice.home.join("http").join("keys.json").exists());
+    assert!(!c.alice.home.join("http").join("enabled").exists());
+    let bx = cli_json(&c.alice, &["inbox", "--as", "muse"]);
+    assert_eq!(bx["messages"][0]["body"], "閉じても残る");
+}
+
+fn http_期限を過ぎると閉じる(c: &Ctx) {
+    let m = muse_on(c, &[("NENWA_HTTP_TTL_SECS", "3")]);
+    let ping = json!({ "jsonrpc": "2.0", "id": 11, "method": "ping" }).to_string();
+    assert_eq!(post(&m.url, Some(&m.key), &ping).unwrap().0, 200, "開き直すと数えていた回数は消える");
+    until(|| post(&m.url, Some(&m.key), &ping).map_or(Some(()), |(s, _)| (s == 401).then_some(())));
+    until(|| (!c.alice.home.join("http").join("enabled").exists()).then_some(()));
+    assert!(!c.alice.home.join("http").join("keys.json").exists());
+    assert!(std::fs::read_to_string(c.alice.home.join("test-daemon.log")).unwrap().contains("http expired"));
+}
+
+fn http_デーモンが再起動しても開き直す(c: &Ctx) {
+    let m = muse_on(c, &[]);
+    stop_daemon(c.daemons.lock().unwrap().remove("alice").unwrap(), &c.alice);
+    c.daemons.lock().unwrap().insert("alice", start_daemon(&c.alice));
+    let ping = json!({ "jsonrpc": "2.0", "id": 12, "method": "ping" }).to_string();
+    until(|| post(&m.url, Some(&m.key), &ping).ok().filter(|(s, _)| *s == 200));
+    cli(&m.env, &["muse", "--off"]).unwrap();
+    let log = std::fs::read_to_string(c.alice.home.join("test-daemon.log")).unwrap();
+    assert!(log.contains("(reopened)"));
+    assert!(!log.contains(&m.key), "鍵はログにも出さない");
+    until(|| who_has(&c.bob, "alice@alice-mac  online").then_some(()));
 }
 
 // ---- フックでつながるエージェント（Cursor、Codex） ----
@@ -656,6 +853,15 @@ fn main() {
         ("受信箱の名前で返事をすると、相手のセッションに届く", 受信箱の名前で返事をすると_相手のセッションに届く),
         ("ターミナルからの送信への返事は terminal の受信箱に入る", ターミナルからの送信への返事はterminalの受信箱に入る),
         ("MCP: NENWA_AS を付けたときだけ check_inbox が出る", mcp_nenwa_asを付けたときだけcheck_inboxが出る),
+        ("HTTP（nenwa muse）: 鍵なしと違う鍵は 401。鍵はハッシュだけ残す", http_muse_鍵なしと違う鍵は401_鍵はハッシュだけ残す),
+        ("HTTP: initialize と tools/list で 3 つのツール。通知は 202", http_initializeとtools_listで3つのツール_通知は202),
+        ("HTTP: muse からの send_message は、送り主が muse で届く", http_museからのsend_messageは_送り主がmuseで届く),
+        ("HTTP: 返事を check_inbox で読める", http_返事をcheck_inboxで読める),
+        ("HTTP: 本文が大きすぎると 413、続けて送ると 429", http_本文が大きすぎると413_続けて送ると429),
+        ("HTTP: 鍵の合わない要求が続くと 503", http_鍵の合わない要求が続くと503),
+        ("HTTP: --off のあとは使えない。受信箱の中身は残る", http_offのあとは使えない_受信箱の中身は残る),
+        ("HTTP: 期限を過ぎると閉じる", http_期限を過ぎると閉じる),
+        ("HTTP: デーモンが再起動しても開き直す", http_デーモンが再起動しても開き直す),
         ("Cursor: sessionStart で宛先が決まり、postToolUse と stop で届く", cursor_session_startで宛先が決まり_post_tool_useとstopで届く),
         (
             "Cursor: MCP（--agent cursor）から送ると、そのセッションが送り主になる",

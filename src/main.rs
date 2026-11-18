@@ -2,9 +2,11 @@
 // ここはコマンドの振り分けだけ。
 mod claude;
 mod daemon;
+mod http;
 mod install;
 mod mcp;
 mod message;
+mod muse;
 mod net;
 mod os;
 mod setup;
@@ -45,6 +47,9 @@ const USAGE: &str = "使い方（はじめては install.sh の 1 行で、導�
   nenwa wake <受信箱> <webhook の URL>            受信箱に届いたら webhook で起こす（鍵は画面に出さずに入れる）
   nenwa wake <受信箱> --import <JSON>             { url, key } の JSON から設定する
   nenwa wake <受信箱> --test                      試しに 1 回起こす
+  nenwa muse [--hours 時間] [--key-out ファイル]  Muse をつなぐ: 受信箱 muse と鍵（クリップボードへ）を作り、
+                                                   HTTP の入り口を Tailscale Funnel で開く（既定は 2 時間で閉じる。0 なら閉じない）
+  nenwa muse --off                               Muse の入り口と Funnel を閉じ、鍵を消す（受信箱の中身は残す）
   nenwa daemon                                   デーモンを前で動かす（ふつうは自動で起動）
   nenwa mcp [--as 受信箱 | --agent codex|cursor]  MCP サーバー（各エージェントが起動する）
   nenwa hook <codex|cursor> <イベント>            フック（Codex / Cursor が起動する）
@@ -175,6 +180,7 @@ fn run() -> Result<()> {
             print(&ask(json!({ "op": "inbox", "name": name, "wait": wait }))?);
         }
         "wake" => wake::wake_command(&args)?,
+        "muse" => muse::muse_command(&mut args)?,
         "daemon" => {
             let rt = tokio::runtime::Runtime::new()?;
             if let Err(e) = rt.block_on(daemon::start()) {

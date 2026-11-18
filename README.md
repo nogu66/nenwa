@@ -145,6 +145,27 @@ nenwa send --as grok --reply-to <id> <address> "<reply>"
 
 Replies to messages sent from the terminal go to the `terminal` inbox, so you can read them with `nenwa inbox`.
 
+## Connecting Muse (HTTP)
+
+Muse runs in the cloud and cannot start a command on your computer, so it needs an HTTPS MCP endpoint and a key. `nenwa muse` opens one from the daemon on this Mac and publishes it through [Tailscale Funnel](https://tailscale.com/kb/1223/funnel) (Tailscale must be installed and signed in).
+
+```sh
+nenwa muse              # prints the URL; the key goes to the clipboard, never to the screen
+nenwa muse --hours 8    # close after 8 hours instead of 2 (0 keeps it open)
+nenwa muse --off        # close Funnel and the endpoint, and delete the key
+```
+
+1. Run `nenwa muse`. The first time, Tailscale may ask you to enable Funnel in its admin console; nenwa shows the link Tailscale prints.
+2. In Muse, add an MCP connector with the printed `https://….ts.net/mcp` URL, and paste the key from the clipboard as the Bearer token.
+
+Muse gets `list_team` / `send_message` / `check_inbox`, and always sends as the `muse` inbox (for example `nogu/muse@mac`). It cannot pick another name. Muse cannot be woken up, so it calls `check_inbox` itself (it waits up to 25 seconds).
+
+- The endpoint closes by itself after **2 hours**: the daemon closes Funnel and the endpoint and deletes the key. Messages in the `muse` inbox are kept.
+- In Muse, set the connector to **approve every action**. While it is open, do not keep Claude Code sessions running in a mode that skips permission prompts: a message from Muse would run there without anyone checking.
+- Only the SHA-256 of the key is stored (`http/keys.json`, mode 600). Running `nenwa muse` again makes a new key and the old one stops working at once.
+- The daemon listens on `127.0.0.1:8787` only, so requests from outside arrive through Funnel. Requests without the right key get 401, bodies over 64 KiB get 413, more than 30 requests a minute per key get 429, and after more than 60 wrong-key requests in a minute every request gets 503 for 10 minutes.
+- The Mac must be awake. Nothing reaches it while it sleeps.
+
 ## State files (`~/.nenwa/`, change with `NENWA_HOME`)
 
 | File | Contents |
@@ -154,6 +175,8 @@ Replies to messages sent from the terminal go to the `terminal` inbox, so you ca
 | `mailboxes.json` | The inboxes on this computer (`terminal` always exists) |
 | `inbox/<name>.json` | Messages waiting in an inbox (removed once read) |
 | `wake/<name>.json` | URL and key of the webhook that wakes an inbox (mode 600) |
+| `http/keys.json` | SHA-256 of the key for `nenwa muse` (mode 600. The key itself is not stored) |
+| `http/enabled` | Present while the HTTP endpoint is open: port, closing time, whether Funnel is used (the daemon reopens it after a restart) |
 | `agents.json` | Codex / Cursor conversations seen through the hooks (forgotten after one day unseen) |
 | `peers.json` | Names and addresses of computers it has connected to (reconnected on every start) |
 | `sock` | The daemon's unix socket |

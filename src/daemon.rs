@@ -3,6 +3,7 @@
 // - 内側: 手元の通信（unix ソケット）。CLI と MCP サーバーがここに who / send を聞きに来る。
 // - 配送: 宛先のセッションの受信ソケットに書く（claude.rs の post）。相手がオフラインなら outbox に置いて、つながったら送る。
 // - 受信箱: Claude Code 以外（Grok Bot など）は、受信箱に貯めて check_inbox で読ませ、webhook で起こす。
+// - HTTP の入り口: nenwa muse で開く（http.rs）。期限を過ぎたらここで閉じる。
 use anyhow::{Result, anyhow, bail};
 use interprocess::local_socket::tokio::{Stream as LocalStream, prelude::*};
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
@@ -19,7 +20,7 @@ use crate::claude::{self, claude_sessions};
 use crate::message::{MAX_BODY, Message, frame, is_mailbox_name, js_len, parse_address, slug};
 use crate::net;
 use crate::state::{self, now_iso, now_ms, read_json, write_json_private};
-use crate::{os, wake};
+use crate::{http, muse, os, wake};
 
 const MAX_DEPTH: u32 = 10; // 人の入力なしにエージェント同士が続けて返事できる回数
 const RATE_PER_MIN: usize = 20; // 1 人の送り主から 1 分に受け取る数
@@ -116,6 +117,7 @@ pub struct Daemon {
     pub ep: OnceLock<iroh::Endpoint>,
     codex_bin: String,
     st: Mutex<St>,
+    http: tokio::sync::Mutex<Option<http::Running>>,
 }
 
 // 問い合わせの項目のうち、空でない文字列だけを取り出す
@@ -680,6 +682,7 @@ impl Daemon {
                 json!({ "address": self.own(name), "messages": self.take_inbox(name, num(&req["wait"]), true).await? })
             }
             "hook" => self.hook_event(req).await?,
+            "http" => self.http_op(req).await?,
             // 招待に入れる自分の住所
             "addr" => match self.ep.get() {
                 Some(ep) => serde_json::to_value(net::my_addr(ep).await)?,
@@ -687,6 +690,55 @@ impl Daemon {
             },
             _ => bail!("unknown op: {op}"),
         })
+    }
+
+    // HTTP の入り口を開く（開き直す）か閉じる。開き直すと鍵を読み直し、数えていた回数も消える。
+    async fn http_op(&self, req: &Value) -> Result<Value> {
+        let mut cur = self.http.lock().await;
+        if let Some(r) = cur.take() {
+            r.stop().await;
+        }
+        if req["on"] != true {
+            http::clear();
+            log!("http off");
+            return Ok(json!({ "stopped": true }));
+        }
+        let port = num(&req["port"]);
+        if !(1.0..=65535.0).contains(&port) {
+            bail!("port が正しくありません");
+        }
+        let e = http::Enabled { port: port as u16, expires: req["expires"].as_u64(), funnel: req["funnel"] == true };
+        match http::start(&e).await {
+            Ok(r) => *cur = Some(r),
+            Err(err) => {
+                http::clear();
+                return Err(err);
+            }
+        }
+        log!("http on 127.0.0.1:{}{}", e.port, e.expires.map_or(String::new(), |ms| format!(" until {}", state::iso(ms))));
+        Ok(json!({ "port": e.port }))
+    }
+
+    // 期限を過ぎていたら、入り口と鍵と Funnel を閉じる
+    async fn http_expire(&self) {
+        let mut cur = self.http.lock().await;
+        let Some(r) = cur.take_if(|r| r.enabled.expired(now_ms())) else { return };
+        let e = r.enabled.clone();
+        r.stop().await;
+        Self::http_closed(&e);
+    }
+
+    fn http_closed(e: &http::Enabled) {
+        http::clear();
+        log!("http expired");
+        if e.funnel {
+            let port = e.port;
+            tokio::task::spawn_blocking(move || {
+                if let Err(err) = muse::funnel_off(port) {
+                    log!("funnel off failed {err}");
+                }
+            });
+        }
     }
 
     async fn serve(self: Arc<Self>, c: LocalStream) {
@@ -780,6 +832,7 @@ pub async fn start() -> Result<()> {
         ep: OnceLock::new(),
         codex_bin: std::env::var("NENWA_CODEX_BIN").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| "codex".into()),
         st: Mutex::new(st),
+        http: tokio::sync::Mutex::new(None),
     });
     if network {
         let _ = d.ep.set(net::bind(seed).await?);
@@ -823,6 +876,28 @@ pub async fn start() -> Result<()> {
     tokio::spawn(async move {
         while let Ok(c) = listener.accept().await {
             tokio::spawn(dd.clone().serve(c));
+        }
+    });
+
+    // nenwa muse で開いていた HTTP の入り口を開き直す（中で手元の通信を使うので、その待ち受けのあとで）
+    if let Some(e) = http::load_enabled() {
+        if e.expired(now_ms()) {
+            Daemon::http_closed(&e);
+        } else {
+            match http::start(&e).await {
+                Ok(r) => {
+                    log!("http on 127.0.0.1:{} (reopened)", e.port);
+                    *d.http.lock().await = Some(r);
+                }
+                Err(err) => log!("http reopen failed {err}"),
+            }
+        }
+    }
+    let dd = d.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            dd.http_expire().await;
         }
     });
 

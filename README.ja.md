@@ -145,6 +145,27 @@ nenwa send --as grok --reply-to <id> <宛先> "<返事>"
 
 ターミナルから送ったメッセージへの返事は `terminal` の受信箱に入るので、`nenwa inbox` で読める。
 
+## Muse とつなぐ（HTTP）
+
+Muse はクラウドで動くので、このパソコンのコマンドを起動できない。そのため、HTTPS の MCP の入り口と鍵が要る。`nenwa muse` は、この Mac のデーモンに入り口を開き、[Tailscale Funnel](https://tailscale.com/kb/1223/funnel) で外に出す（Tailscale を入れてサインインしておく）。
+
+```sh
+nenwa muse              # URL を表示する。鍵はクリップボードに入れ、画面には出さない
+nenwa muse --hours 8    # 2 時間ではなく 8 時間で閉じる（0 なら閉じない）
+nenwa muse --off        # Funnel と入り口を閉じ、鍵を消す
+```
+
+1. `nenwa muse` を実行する。初めてのときは、Tailscale の管理画面で Funnel を有効にするよう求められることがある。そのときは Tailscale が出すリンクをそのまま見せる。
+2. Muse でコネクタ（MCP）を足し、表示された `https://….ts.net/mcp` の URL を入れ、クリップボードの鍵を Bearer トークンとして貼る。
+
+Muse が使えるのは `list_team` / `send_message` / `check_inbox` の 3 つ。送り主はいつも受信箱 `muse`（例: `nogu/muse@mac`）で、別の名前は名乗れない。Muse を起こす仕組みはないので、Muse には自分で `check_inbox` を呼んでもらう（待つのは最長 25 秒）。
+
+- 入り口は **2 時間** で自動で閉じる。デーモンが Funnel と入り口を閉じ、鍵を消す。受信箱 `muse` の中身は残す。
+- Muse 側で、このコネクタは **操作のたびに承認** にする。開いている間は、権限確認を飛ばすモードの Claude Code の会話を開かない。Muse から届いた頼みが、だれにも確かめられずに動いてしまう。
+- 鍵は SHA-256 だけを残す（`http/keys.json`、権限 600）。もう一度 `nenwa muse` を実行すると鍵を作り直し、古い鍵はすぐ使えなくなる。
+- デーモンが待ち受けるのは `127.0.0.1:8787` だけなので、外からは Funnel を通ったものだけが届く。鍵がない・合わないと 401、本文が 64 KiB を超えると 413、1 つの鍵から 1 分に 30 回を超えると 429、鍵の合わない要求が 1 分に 60 回を超えると 10 分間すべて 503 を返す。
+- Mac が寝ている間はつながらない。
+
 ## 状態ファイル（`~/.nenwa/`、`NENWA_HOME` で変更可）
 
 | ファイル | 中身 |
@@ -154,6 +175,8 @@ nenwa send --as grok --reply-to <id> <宛先> "<返事>"
 | `mailboxes.json` | このパソコンの受信箱の一覧（`terminal` はいつもある） |
 | `inbox/<名前>.json` | 受信箱に貯まっているメッセージ（読むと消える） |
 | `wake/<名前>.json` | 受信箱を起こす webhook の URL と鍵（権限 600） |
+| `http/keys.json` | `nenwa muse` の鍵の SHA-256（権限 600。鍵そのものは残さない） |
+| `http/enabled` | HTTP の入り口が開いている間だけある。ポート、閉じる時刻、Funnel を使うか（デーモンが再起動したときに開き直す） |
 | `agents.json` | フックで見えた Codex / Cursor の会話（1 日見えなければ忘れる） |
 | `peers.json` | つながったことのあるパソコンの名前と住所（起動のたびにつなぎ直す） |
 | `sock` | デーモンの unix ソケット |

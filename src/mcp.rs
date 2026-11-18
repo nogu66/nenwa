@@ -1,6 +1,7 @@
 // Claude Code（や Grok Bot）が起動する stdio の MCP サーバー。中身はデーモンに聞くだけ。
 // --as <名前>（NENWA_AS）で起動すると、その名前の受信箱を持つ相手として振る舞う（Claude Code 以外向け）。
 // --agent codex|cursor（NENWA_AGENT）は Codex / Cursor から起動されたとき。どの会話かはデーモンがフックの記録から決める。
+// 要求への答えは respond にまとめてある。HTTP の入り口（http.rs）も同じものを使う。
 use anyhow::Result;
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, Write};
@@ -50,10 +51,10 @@ pub fn format_who(w: &Value) -> String {
     lines.join("\n")
 }
 
-struct Server {
-    as_: String,
-    agent: String,
-    out: Mutex<std::io::Stdout>,
+pub struct Server {
+    pub as_: String,
+    pub agent: String,
+    pub max_wait: u32, // check_inbox が待てる秒数（デーモンの上限は 50 秒。HTTP はもっと短くする）
 }
 
 impl Server {
@@ -96,9 +97,9 @@ impl Server {
         if self.with_inbox() {
             t.push(json!({
                 "name": "check_inbox",
-                "description": "自分の受信箱に届いたメッセージを読む（読んだ分は受信箱から消える）。wait_secs を付けると、空のときは届くまで最長 50 秒待つ。\
-                    返事は send_message で、to に送り主、reply_to にそのメッセージの id を入れる。",
-                "inputSchema": { "type": "object", "properties": { "wait_secs": { "type": "number", "description": "空のときに待つ秒数（0〜50）" } } },
+                "description": format!("自分の受信箱に届いたメッセージを読む（読んだ分は受信箱から消える）。wait_secs を付けると、空のときは届くまで最長 {} 秒待つ。\
+                    返事は send_message で、to に送り主、reply_to にそのメッセージの id を入れる。", self.max_wait),
+                "inputSchema": { "type": "object", "properties": { "wait_secs": { "type": "number", "description": format!("空のときに待つ秒数（0〜{}）", self.max_wait) } } },
             }));
         }
         t
@@ -127,7 +128,9 @@ impl Server {
                     req.extend(self.who());
                 }
                 if let Some(w) = args.get("wait_secs") {
-                    req.insert("wait".into(), w.clone());
+                    // 文字列の数も受ける（デーモンと同じ）。上限はここで切る。
+                    let n = w.as_f64().or_else(|| w.as_str().and_then(|t| t.trim().parse().ok())).filter(|n: &f64| n.is_finite());
+                    req.insert("wait".into(), json!(n.unwrap_or(0.0).clamp(0.0, self.max_wait as f64)));
                 }
                 ask(Value::Object(req)).map(|r| {
                     let address = r["address"].as_str().unwrap_or("");
@@ -143,56 +146,45 @@ impl Server {
         })
     }
 
-    fn write(&self, mut msg: Map<String, Value>) {
-        let mut m = Map::new();
-        m.insert("jsonrpc".into(), json!("2.0"));
-        m.append(&mut msg);
-        let mut out = self.out.lock().unwrap_or_else(|e| e.into_inner());
-        let _ = writeln!(out, "{}", Value::Object(m));
-        let _ = out.flush();
-    }
-
-    fn handle(&self, line: &str) {
-        let obj = |v: Value| match v {
-            Value::Object(m) => m,
-            _ => Map::new(),
-        };
-        let Ok(req) = serde_json::from_str::<Value>(line) else {
-            return self.write(obj(json!({ "id": null, "error": { "code": -32700, "message": "Parse error" } })));
-        };
-        let Some(id) = req.get("id").cloned() else { return };
+    // JSON-RPC の要求 1 件に答える。通知（id なし）には答えない。
+    pub fn respond(&self, req: &Value) -> Option<Value> {
+        let id = req.get("id").cloned()?;
         let method = req["method"].as_str().unwrap_or("");
         let params = &req["params"];
-        let res = match method {
-            "initialize" => json!({ "id": id, "result": {
+        Some(match method {
+            "initialize" => json!({ "jsonrpc": "2.0", "id": id, "result": {
                 "protocolVersion": params["protocolVersion"].as_str().filter(|v| !v.is_empty()).unwrap_or("2025-06-18"),
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "nenwa", "version": env!("CARGO_PKG_VERSION") },
                 "instructions": INSTRUCTIONS,
             } }),
-            "ping" => json!({ "id": id, "result": {} }),
-            "tools/list" => json!({ "id": id, "result": { "tools": self.tools() } }),
+            "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
+            "tools/list" => json!({ "jsonrpc": "2.0", "id": id, "result": { "tools": self.tools() } }),
             "tools/call" => {
                 let name = params["name"].as_str().unwrap_or("");
                 let args = params.get("arguments").filter(|a| a.is_object()).cloned().unwrap_or(json!({}));
                 match self.call(name, &args) {
                     None => {
-                        json!({ "id": id, "error": { "code": -32602, "message": format!("Unknown tool: {}", params["name"].as_str().unwrap_or("undefined")) } })
+                        json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32602, "message": format!("Unknown tool: {}", params["name"].as_str().unwrap_or("undefined")) } })
                     }
-                    Some(Ok(text)) => json!({ "id": id, "result": { "content": [{ "type": "text", "text": text }] } }),
+                    Some(Ok(text)) => json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": text }] } }),
                     Some(Err(e)) => {
-                        json!({ "id": id, "result": { "content": [{ "type": "text", "text": e.to_string() }], "isError": true } })
+                        json!({ "jsonrpc": "2.0", "id": id, "result": { "content": [{ "type": "text", "text": e.to_string() }], "isError": true } })
                     }
                 }
             }
-            _ => json!({ "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }),
-        };
-        self.write(obj(res));
+            _ => json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32601, "message": format!("Method not found: {method}") } }),
+        })
     }
 }
 
+pub fn parse_error() -> Value {
+    json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32700, "message": "Parse error" } })
+}
+
 pub fn run_mcp(as_: String, agent: String) {
-    let server = Arc::new(Server { as_, agent, out: Mutex::new(std::io::stdout()) });
+    let server = Arc::new(Server { as_, agent, max_wait: 50 });
+    let out = Arc::new(Mutex::new(std::io::stdout()));
     // 受信箱は起動したときに作っておく。まだ何も呼ばれていなくても、宛先として一覧に出る。
     if !server.as_.is_empty() {
         let name = server.as_.clone();
@@ -210,8 +202,18 @@ pub fn run_mcp(as_: String, agent: String) {
         if line.is_empty() {
             continue;
         }
-        let s = server.clone();
-        running.push(std::thread::spawn(move || s.handle(&line)));
+        let (s, out) = (server.clone(), out.clone());
+        running.push(std::thread::spawn(move || {
+            let res = match serde_json::from_str::<Value>(&line) {
+                Ok(req) => s.respond(&req),
+                Err(_) => Some(parse_error()),
+            };
+            if let Some(res) = res {
+                let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = writeln!(out, "{res}");
+                let _ = out.flush();
+            }
+        }));
     }
     // stdin が閉じても、答えている途中の分は答え終える
     for t in running {
