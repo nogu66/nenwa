@@ -352,6 +352,34 @@ fn ターミナルから送ると相手のセッションに枠つきで届く(c
     );
 }
 
+// /clear すると会話の ID が変わり、宛先（ID の先頭 4 文字）も変わる。古い宛先への返事と、送り主の名前がずれないこと。
+fn clearで会話のidが変わっても_古い宛先に届き_送り主は今の名前になる(c: &Ctx) {
+    let file = c.bob.claude.join("sessions").join(format!("{}.json", std::process::id()));
+    let before = std::fs::read_to_string(&file).unwrap();
+    let mut s: Value = serde_json::from_str(&before).unwrap();
+    let old_id = s["sessionId"].as_str().unwrap().to_string();
+    s["sessionId"] = json!("cccc0000-0000-4000-8000-000000000000");
+    std::fs::write(&file, s.to_string()).unwrap();
+
+    let n = c.bob_session.len();
+    let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "clear のあとの返事"]);
+    assert_eq!(res["state"], "delivered", "{res}");
+    until(|| (c.bob_session.len() > n).then_some(()));
+
+    // MCP サーバーの環境変数は、起動したときの古い ID のまま
+    let mut p =
+        c.bob.command(&["mcp"]).env("CLAUDE_CODE_SESSION_ID", &old_id).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
+    let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "alice/terminal@alice-mac", "message": "今の名前で送る" } } });
+    writeln!(p.stdin.take().unwrap(), "{req}").unwrap();
+    let mut line = String::new();
+    BufReader::new(p.stdout.take().unwrap()).read_line(&mut line).unwrap();
+    let _ = p.kill();
+    let _ = p.wait();
+    std::fs::write(&file, before).unwrap();
+    assert!(line.contains("bob/api-cccc@bob-mac"), "{line}");
+    let _ = cli_json(&c.alice, &["inbox"]);
+}
+
 fn いないセッション宛てはno_session(c: &Ctx) {
     let res = cli_json(&c.alice, &["send", "bob/nope@bob-mac", "hi"]);
     assert_eq!(res["state"], "no_session");
@@ -847,6 +875,10 @@ fn main() {
     let tests: Vec<Test> = vec![
         ("相手のセッションが一覧に出る", 相手のセッションが一覧に出る),
         ("ターミナルから送ると相手のセッションに枠つきで届く", ターミナルから送ると相手のセッションに枠つきで届く),
+        (
+            "clearで会話のidが変わっても_古い宛先に届き_送り主は今の名前になる",
+            clearで会話のidが変わっても_古い宛先に届き_送り主は今の名前になる,
+        ),
         ("いないセッション宛ては no_session", いないセッション宛てはno_session),
         ("受信箱に届くと webhook で起こし、check_inbox 相当で読める", 受信箱に届くとwebhookで起こし_check_inbox相当で読める),
         ("空の受信箱は --wait で届くまで待つ", 空の受信箱は_waitで届くまで待つ),

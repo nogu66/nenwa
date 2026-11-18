@@ -2,12 +2,15 @@
 // 開いているセッションは ~/.claude/sessions/<pid>.json に自分の受信ソケット（messagingSocketPath）を書いている。
 // そこに {"type":"user",...} を 1 行書くと、ツール呼び出しの合間に届き、待機中ならそこでターンが始まる。
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::message::slug;
 use crate::os;
 
 pub struct ClaudeSession {
+    pub pid: i64,
     pub session_id: String,
     pub socket: String,
     pub name: String,
@@ -47,6 +50,7 @@ pub fn claude_sessions() -> Vec<ClaudeSession> {
         .map(|s| {
             let id = text(&s, "sessionId");
             ClaudeSession {
+                pid: s["pid"].as_i64().unwrap_or(0),
                 label: format!("{}-{}", slug(&basename(&text(&s, "cwd"))), id.chars().take(4).collect::<String>()),
                 session_id: id,
                 socket: text(&s, "messagingSocketPath"),
@@ -56,16 +60,32 @@ pub fn claude_sessions() -> Vec<ClaudeSession> {
         })
         .collect();
     list.sort_by(|a, b| a.label.cmp(&b.label));
+    let mut former = FORMER.lock().unwrap_or_else(|e| e.into_inner());
+    for s in &list {
+        former.insert(s.label.clone(), s.pid);
+    }
+    former.retain(|_, pid| list.iter().any(|s| s.pid == *pid));
     list
 }
 
-// MCP サーバーを起動した Claude Code の会話。環境変数が一番確か。なければ親プロセスをさかのぼる。
-pub fn caller_session_id() -> Option<String> {
-    if let Ok(id) = std::env::var("CLAUDE_CODE_SESSION_ID")
-        && !id.is_empty()
-    {
-        return Some(id);
+// 見たことのある宛先 → その会話のプロセス。/clear すると会話の ID が変わって宛先も変わるので、
+// 古い宛先に来たメッセージ（前の宛先への返事など）を、同じプロセスの今の会話に届けるために覚えておく。
+static FORMER: Mutex<BTreeMap<String, i64>> = Mutex::new(BTreeMap::new());
+
+// 宛先の会話を探す。今の宛先になければ、同じプロセスが前に名乗っていた宛先として探す。
+pub fn find_session(label: &str) -> Option<ClaudeSession> {
+    let mut list = claude_sessions();
+    if let Some(i) = list.iter().position(|s| s.label == label) {
+        return Some(list.swap_remove(i));
     }
+    let pid = *FORMER.lock().unwrap_or_else(|e| e.into_inner()).get(label)?;
+    let i = list.iter().position(|s| s.pid == pid)?;
+    Some(list.swap_remove(i))
+}
+
+// MCP サーバーを起動した Claude Code の会話。親プロセスをさかのぼって、今の会話の ID を読む。
+// 環境変数は MCP サーバーを起動したときの ID のままで、/clear のあとは古くなるので、見つからないときだけ使う。
+pub fn caller_session_id() -> Option<String> {
     let mut pid = os::own_parent_pid();
     for _ in 0..6 {
         if pid <= 1 {
@@ -73,12 +93,14 @@ pub fn caller_session_id() -> Option<String> {
         }
         if let Ok(t) = std::fs::read_to_string(sessions_dir().join(format!("{pid}.json")))
             && let Ok(v) = serde_json::from_str::<Value>(&t)
+            && let Some(id) = v["sessionId"].as_str()
         {
-            return v["sessionId"].as_str().map(String::from);
+            return Some(id.to_string());
         }
-        pid = os::parent_pid(pid)?;
+        let Some(parent) = os::parent_pid(pid) else { break };
+        pid = parent;
     }
-    None
+    std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|id| !id.is_empty())
 }
 
 // パスが \\.\pipe\ で始まれば名前付きパイプ、それ以外は unix ソケット（どちらも os に任せる）

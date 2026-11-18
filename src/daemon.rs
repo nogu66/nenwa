@@ -445,7 +445,7 @@ impl Daemon {
     pub async fn deliver_local(&self, msg: Message) -> &'static str {
         // msg.to はいつも正しい形（受け取るときと送るときに確かめてある）
         let Some(to) = parse_address(&msg.to) else { return "no_session" };
-        if let Some(s) = claude_sessions().into_iter().find(|x| x.label == to.label) {
+        if let Some(s) = claude::find_session(&to.label) {
             return match claude::post(&s.socket, &frame(&msg)).await {
                 Ok(()) => "delivered",
                 Err(e) => {
