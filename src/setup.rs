@@ -1,4 +1,4 @@
-// Codex、Cursor、Gemini CLI、Qwen Code の設定に nenwa の MCP サーバーとフックを足す（外す）。
+// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode の設定に nenwa の MCP サーバーとフックを足す（外す）。
 // 書き換える前に一度だけ <ファイル>.bak-nenwa を残す。ほかのフックや MCP サーバーには触らない。
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -307,12 +307,75 @@ fn setup_settings_json(
     Some(SetupResult { agent, files: vec![file.display().to_string()] })
 }
 
+// ---- OpenCode ----
+// コマンド型のフックがないので、同じ役目の小さなプラグインを置く。MCP は opencode.json に足す。
+const OPENCODE_PLUGIN: &str = include_str!("opencode_plugin.js");
+
+pub fn opencode_plugin_text() -> String {
+    OPENCODE_PLUGIN.replace("__NENWA_EXE__", &json!(exe().to_string_lossy()).to_string())
+}
+
+fn opencode_dir() -> PathBuf {
+    match std::env::var_os("NENWA_OPENCODE_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => match std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()) {
+            Some(x) => PathBuf::from(x).join("opencode"),
+            None => os::home_dir().join(".config").join("opencode"),
+        },
+    }
+}
+
+fn setup_opencode(remove: bool) -> Option<SetupResult> {
+    let dir = opencode_dir();
+    if !dir.exists() {
+        return None;
+    }
+    // opencode.jsonc があればそちらが使われている。コメント入りで読めないときは、中身を失わないよう触らない。
+    let file = if dir.join("opencode.jsonc").exists() { dir.join("opencode.jsonc") } else { dir.join("opencode.json") };
+    let mut data = match std::fs::read_to_string(&file) {
+        Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
+            Ok(Value::Object(m)) => m,
+            _ => {
+                eprintln!("opencode: {} を読めなかったので、そのままにしました", file.display());
+                return None;
+            }
+        },
+        _ => Map::new(),
+    };
+    let before = data.clone();
+    if remove {
+        if let Some(servers) = data.get_mut("mcp").and_then(Value::as_object_mut) {
+            servers.remove("nenwa");
+        }
+    } else {
+        ensure_obj(&mut data, "mcp").insert(
+            "nenwa".into(),
+            json!({ "type": "local", "command": [exe().to_string_lossy(), "mcp", "--agent", "opencode"], "enabled": true }),
+        );
+    }
+    if data != before {
+        backup(&file);
+        write_json(&file, &data);
+    }
+    // プラグインのフォルダは plugins と plugin のどちらでも読まれる。もうあるほうに置く。
+    let plugins = if !dir.join("plugins").exists() && dir.join("plugin").exists() { dir.join("plugin") } else { dir.join("plugins") };
+    let plugin = plugins.join("nenwa.js");
+    if remove {
+        let _ = std::fs::remove_file(&plugin);
+    } else {
+        let _ = std::fs::create_dir_all(&plugins);
+        let _ = std::fs::write(&plugin, opencode_plugin_text());
+    }
+    Some(SetupResult { agent: "opencode", files: vec![file.display().to_string(), plugin.display().to_string()] })
+}
+
 pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
     [
         setup_codex(remove),
         setup_cursor(remove),
         setup_settings_json("gemini", dir_from("NENWA_GEMINI_DIR", ".gemini"), &GEMINI_EVENTS, 10_000, remove),
         setup_settings_json("qwen", dir_from("NENWA_QWEN_DIR", ".qwen"), &QWEN_EVENTS, 10, remove),
+        setup_opencode(remove),
     ]
     .into_iter()
     .flatten()

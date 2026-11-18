@@ -65,7 +65,7 @@ impl<T> Remember<T> {
     }
 }
 
-// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code）の会話
+// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode）の会話
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Agent {
     pub agent: String,
@@ -82,6 +82,23 @@ pub struct Agent {
     // 直前のフックの親の並び。次のフックと共通する最初のものが本体（間のシェルは毎回変わる）。
     #[serde(default)]
     pub anc: Vec<i64>,
+    // OpenCode の手元のサーバー（http://127.0.0.1:<ポート>）。ここに送ると会話に入る。
+    #[serde(default)]
+    pub url: String,
+}
+
+// 自分のパソコンの中の http だけを受け付ける（フックの入力で、よそへ送らされないように）
+fn local_url(u: &str) -> Option<String> {
+    let rest = u.strip_prefix("http://")?;
+    let host = rest.split(['/', '?', '#']).next()?;
+    let (name, port) = host.rsplit_once(':')?;
+    (matches!(name, "127.0.0.1" | "localhost" | "[::1]") && port.parse::<u16>().is_ok()).then(|| format!("http://{host}"))
+}
+
+fn percent(s: &str) -> String {
+    s.bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect()
 }
 
 fn pids(v: &Value) -> Vec<i64> {
@@ -318,7 +335,17 @@ impl Daemon {
             let label = format!("{}-{tail}", slug(&basename(&cwd)));
             st.agents.push((
                 key.clone(),
-                Agent { agent: agent.into(), id, cwd: cwd.clone(), label, status: String::new(), seen: 0, pid: 0, anc: vec![] },
+                Agent {
+                    agent: agent.into(),
+                    id,
+                    cwd: cwd.clone(),
+                    label,
+                    status: String::new(),
+                    seen: 0,
+                    pid: 0,
+                    anc: vec![],
+                    url: String::new(),
+                },
             ));
         }
         let now = now_ms();
@@ -336,6 +363,9 @@ impl Daemon {
         }
         if !anc.is_empty() {
             a.anc = anc;
+        }
+        if let Some(u) = s(input, "server_url").and_then(local_url) {
+            a.url = u;
         }
         if a.cwd.is_empty() && !cwd.is_empty() {
             a.cwd = cwd;
@@ -387,6 +417,21 @@ impl Daemon {
                 return "delivered";
             }
         }
+        if a.agent == "opencode" && !a.url.is_empty() {
+            // OpenCode は会話ごとに手元のサーバーを持つ。待機中でも作業中でも、ここに送れば会話に入る。
+            let url = format!("{}/session/{}/prompt_async?directory={}", a.url, percent(&a.id).replace('/', "%2F"), percent(&a.cwd));
+            let body = json!({ "parts": [{ "type": "text", "text": frame(&msg) }] }).to_string();
+            let sent = tokio::task::spawn_blocking(move || {
+                let agent: ureq::Agent =
+                    ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(10))).http_status_as_error(false).build().into();
+                agent.post(&url).header("Content-Type", "application/json").send(&body).map(|r| r.status().as_u16())
+            })
+            .await;
+            match sent {
+                Ok(Ok(code)) if (200..300).contains(&code) => return "delivered",
+                other => log!("opencode prompt failed {}: {other:?}", a.label),
+            }
+        }
         let mut st = self.lock();
         self.store_in_inbox(&mut st, &a.label, msg);
         "inbox"
@@ -395,7 +440,7 @@ impl Daemon {
     // フックの出力。届いているメッセージがあれば、そのエージェントのやり方で会話に差し込む。
     async fn hook_event(&self, req: &Value) -> Result<Value> {
         let agent = req["agent"].as_str().unwrap_or("undefined");
-        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen") {
+        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode") {
             bail!("unknown agent: {agent}");
         }
         let event = req["event"].as_str().unwrap_or("");
@@ -411,9 +456,11 @@ impl Daemon {
             return Ok(Value::Null);
         }
         // Cursor の beforeSubmitPrompt は会話に足せないので、メッセージは次の postToolUse か stop まで取っておく。
-        let prompt = agent == "cursor" && event == "user-prompt-submit";
+        // OpenCode のプラグインも、入力のときは会話の登録だけをする。
+        let prompt = matches!(agent, "cursor" | "opencode") && event == "user-prompt-submit";
         let mail = if prompt { vec![] } else { self.take_inbox(&label, 0.0, false).await? };
-        let intro = if event == "session-start" {
+        // OpenCode は始まったときに文脈を足す口がない（足すと、それだけで応答が始まってしまう）
+        let intro = if event == "session-start" && agent != "opencode" {
             format!("nenwa: このセッションの宛先は {} です。", self.own(&label))
         } else {
             String::new()
@@ -430,7 +477,10 @@ impl Daemon {
             }
         }
         if text.is_empty() {
-            return Ok(if prompt { json!({ "continue": true }) } else { Value::Null });
+            return Ok(if prompt && agent == "cursor" { json!({ "continue": true }) } else { Value::Null });
+        }
+        if agent == "opencode" {
+            return Ok(json!({ "text": text }));
         }
         // Codex、Qwen Code、Gemini CLI は Claude Code と同じ形。Gemini だけイベントの名前と、続けさせるときの言葉が違う。
         if agent != "cursor" {

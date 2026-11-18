@@ -78,6 +78,7 @@ impl Home {
             "NENWA_CURSOR_DIR",
             "NENWA_GEMINI_DIR",
             "NENWA_QWEN_DIR",
+            "NENWA_OPENCODE_DIR",
             "XDG_CONFIG_HOME",
             "NENWA_HTTP_PORT",
             "NENWA_HTTP_TTL_SECS",
@@ -292,6 +293,7 @@ fn webhook_server() -> (String, Hooks) {
             let mut headers = HashMap::new();
             let mut line = String::new();
             let _ = r.read_line(&mut line);
+            headers.insert(":path".to_string(), line.split_whitespace().nth(1).unwrap_or("").to_string());
             loop {
                 line.clear();
                 if r.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
@@ -828,6 +830,43 @@ fn 同じフォルダの会話が2つあっても_送り主は呼んだ本体で
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(second)));
 }
 
+// OpenCode: プラグインが会話を知らせ、デーモンは OpenCode の手元のサーバーに送って会話に入れる。
+fn opencode_手元のサーバーに送って会話に入れる_届かなければプラグインのフックで渡す(c: &Ctx) {
+    let (url, got) = webhook_server();
+    let base = url.trim_end_matches("/hook").to_string();
+    let addr = "alice/site-9z8y@alice-mac";
+    let input = json!({ "session_id": "ses_4f0a1b2c3d9Z8Y", "cwd": "/work/my site/site", "server_url": base });
+    // 始まったときは何も足さない（足すと、それだけで応答が始まる）
+    assert_eq!(hook_call(&c.alice, "opencode", "session-start", input.clone()), None);
+    until(|| who_has(&c.bob, addr).then_some(()));
+
+    let before = got.lock().unwrap().len();
+    assert_eq!(cli_json(&c.bob, &["send", addr, "待機中でも届く"])["state"], "delivered");
+    let (headers, body) = got.lock().unwrap()[before].clone();
+    assert_eq!(headers[":path"], "/session/ses_4f0a1b2c3d9Z8Y/prompt_async?directory=/work/my%20site/site");
+    assert_eq!(body["parts"][0]["type"], "text");
+    assert!(body["parts"][0]["text"].as_str().unwrap().contains("待機中でも届く"));
+
+    // よそのサーバーには送らない。届かないので受信箱に置き、プラグインのフックで渡す。
+    let mut away = input.clone();
+    away["session_id"] = json!("ses_0000000000aw4y");
+    away["server_url"] = json!("http://example.com:80");
+    hook_call(&c.alice, "opencode", "user-prompt-submit", away.clone());
+    let n = got.lock().unwrap().len();
+    assert_eq!(cli_json(&c.bob, &["send", "alice/site-aw4y@alice-mac", "フックで受けて"])["state"], "inbox");
+    assert_eq!(got.lock().unwrap().len(), n);
+    assert_eq!(hook_call(&c.alice, "opencode", "user-prompt-submit", away.clone()), None, "入力のときは取り出さない");
+    let tool = hook_call(&c.alice, "opencode", "post-tool-use", away.clone()).unwrap();
+    assert!(tool["text"].as_str().unwrap().contains("フックで受けて"));
+    cli(&c.bob, &["send", "alice/site-aw4y@alice-mac", "止まる前に"]).unwrap();
+    assert!(hook_call(&c.alice, "opencode", "stop", away.clone()).unwrap()["text"].as_str().unwrap().contains("止まる前に"));
+    assert_eq!(hook_call(&c.alice, "opencode", "stop", away.clone()), None);
+
+    hook_call(&c.alice, "opencode", "session-end", away);
+    hook_call(&c.alice, "opencode", "session-end", input);
+    until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains("alice/site-")));
+}
+
 const GEMINI_ID: &str = "7d1e2f3a-aaaa-bbbb-cccc-00000000f00d";
 const GEMINI_ADDR: &str = "alice/docs-f00d@alice-mac";
 
@@ -914,7 +953,13 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     std::fs::write(gemini.join("settings.json"), gemini_before.to_string()).unwrap();
     let qwen_text = "{\n  // コメント\n  \"theme\": \"Default\"\n}\n";
     std::fs::write(qwen.join("settings.json"), qwen_text).unwrap();
+    let opencode = c.root.join("opencode-home");
+    std::fs::create_dir_all(opencode.join("plugins")).unwrap();
+    std::fs::write(opencode.join("plugins").join("other.js"), "// other").unwrap();
+    let opencode_before = json!({ "mcp": { "other": { "type": "local", "command": ["other"] } } });
+    std::fs::write(opencode.join("opencode.json"), opencode_before.to_string()).unwrap();
     let h = c.alice.with(&[
+        ("NENWA_OPENCODE_DIR", &opencode.display().to_string()),
         ("NENWA_CODEX_DIR", &codex.display().to_string()),
         ("NENWA_CURSOR_DIR", &cursor.display().to_string()),
         ("NENWA_GEMINI_DIR", &gemini.display().to_string()),
@@ -954,9 +999,19 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert!(re(r#"nenwa(\.exe)?['"] hook gemini stop$"#).is_match(g["hooks"]["AfterAgent"][0]["hooks"][0]["command"].as_str().unwrap()));
     assert_eq!(g["hooks"]["AfterAgent"][0]["hooks"][0]["timeout"], 10_000);
     assert_eq!(std::fs::read_to_string(qwen.join("settings.json")).unwrap(), qwen_text);
+    let o = read(opencode.join("opencode.json"));
+    assert_eq!(o["mcp"]["other"]["command"], json!(["other"]));
+    assert_eq!(o["mcp"]["nenwa"]["type"], "local");
+    assert_eq!(o["mcp"]["nenwa"]["command"].as_array().unwrap()[1..], [json!("mcp"), json!("--agent"), json!("opencode")]);
+    let plugin = std::fs::read_to_string(opencode.join("plugins").join("nenwa.js")).unwrap();
+    assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&plugin), "実行ファイルの場所が入る");
+    assert!(!plugin.contains("__NENWA_EXE__"));
 
     cli(&h, &["setup", "--remove"]).unwrap();
     assert_eq!(read(gemini.join("settings.json")), gemini_before);
+    assert_eq!(read(opencode.join("opencode.json")), opencode_before);
+    assert!(!opencode.join("plugins").join("nenwa.js").exists());
+    assert!(opencode.join("plugins").join("other.js").exists());
     assert_eq!(std::fs::read_to_string(codex.join("config.toml")).unwrap().trim(), toml.trim());
     assert_eq!(read(codex.join("hooks.json"))["hooks"], json!({ "PostToolUse": [other_hook] }));
     assert_eq!(read(cursor.join("mcp.json"))["mcpServers"], json!({ "other": { "command": "other" } }));
@@ -1061,6 +1116,10 @@ fn main() {
         (
             "Codex: 同じフォルダの会話が 2 つあっても、送り主は呼んだ本体で決まる。本体が消えた会話は一覧から外れる",
             同じフォルダの会話が2つあっても_送り主は呼んだ本体で決まり_本体が消えた会話は一覧から外れる,
+        ),
+        (
+            "OpenCode: 手元のサーバーに送って会話に入れる。届かなければプラグインのフックで渡す",
+            opencode_手元のサーバーに送って会話に入れる_届かなければプラグインのフックで渡す,
         ),
         (
             "Gemini CLI と Qwen Code: フックで宛先が決まり、それぞれの形で届く",
