@@ -115,6 +115,8 @@ Claude Code 中出现两个工具（对于 Grok Bot 等拥有收件箱的一方�
 - Pi 已用 0.82.1 的 RPC 模式确认：扩展能加载、对话出现在列表中、消息能让空闲对话开始工作、工具调用的发送者是该对话。
 - Gemini CLI、Antigravity CLI、Qwen Code 和 Copilot CLI 的支持是按官方文档实现的，只用伪造的输入测试过，尚未在真实工具上确认。如果 `settings.json` 无法解析（例如带注释），则保持原样不修改。
 - Codex 在信任钩子之前不会运行它们。`install` 之后，在新打开的会话中打开 `/hooks`，信任 nenwa 的钩子。
+- Codex 每次调用 nenwa 的工具都会请求批准（因此 `codex exec` 这类非交互运行无法调用）。是否取消批准由你自己决定。如果要取消，在 `~/.codex/config.toml` 的 `[mcp_servers.nenwa]` 下添加 `default_tools_approval_mode = "approve"`；这样 Codex 就可以不经确认向其他智能体发送消息。重新运行 `nenwa install` 会移除这一行。
+- 消息送不到时，运行 `nenwa doctor`。它会按智能体显示：是否已安装、nenwa 是否已注册、是否能看到对话。
 - Cursor 的 `beforeSubmitPrompt` 无法向对话添加文字，所以不在那里取出消息。
 - 如果守护进程没有运行，钩子会不输出任何内容直接结束（不会阻塞智能体）。
 

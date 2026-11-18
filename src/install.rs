@@ -31,6 +31,90 @@ pub fn report_setup(remove: bool) -> Vec<SetupResult> {
     done
 }
 
+// PATH の中にその名前のコマンドがあるか（実行はしない）
+fn on_path(name: &str) -> bool {
+    let exts: &[&str] = if cfg!(windows) { &["", ".exe", ".cmd", ".bat"] } else { &[""] };
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| exts.iter().any(|e| d.join(format!("{name}{e}")).is_file())))
+}
+
+// エージェントごとに、入っているか、nenwa が登録済みか、会話が見えているかを出す。
+// 「nenwa はつながっているのに、エージェント側の事情で使えない」を見分けるためのもの。
+pub fn doctor() {
+    let who = try_request(&json!({ "op": "who" }));
+    match &who {
+        Some(_) => println!("デーモン: 動いています"),
+        None => println!("デーモン: 動いていません（nenwa install で自動起動に入ります）"),
+    }
+    let agents: serde_json::Map<String, serde_json::Value> = state::read_json(&state::agents_file()).unwrap_or_default();
+    let day = 24 * 60 * 60 * 1000;
+    let live = |kind: &str| {
+        agents
+            .values()
+            .filter(|a| {
+                a["agent"] == kind
+                    && a["status"] != "offline"
+                    && state::now_ms().saturating_sub(a["seen"].as_u64().unwrap_or(0)) < day
+                    && a["pid"].as_i64().is_none_or(|p| p == 0 || os::alive(p))
+            })
+            .count()
+    };
+    println!("\n  {:<16} {:<8} {:<8} 開いている会話", "エージェント", "本体", "登録");
+    let claude = crate::claude::claude_sessions().len();
+    println!("  {:<16} {:<8} {:<8} {claude}", "Claude Code", if on_path("claude") { "あり" } else { "なし" }, "（MCP）");
+    let rows: [(&str, &str, &[&str], &str); 8] = [
+        ("Codex", "codex", &["codex"], "ツールは呼ぶたびに承認が要る。開いた会話で /hooks を開き、nenwa のフックを信頼する"),
+        ("Cursor", "cursor", &["cursor-agent", "cursor"], "CLI（cursor-agent）はログインと、MCP の承認が要る"),
+        ("OpenCode", "opencode", &["opencode"], "待機中の会話にも届く"),
+        ("Pi", "pi", &["pi"], "待機中の会話にも届く"),
+        ("Copilot CLI", "copilot", &["copilot"], "公式ドキュメントどおりに実装。実物では未確認"),
+        ("Gemini CLI", "gemini", &["gemini"], "フックのある版が要る（0.1 系は不可）。実物では未確認"),
+        ("Antigravity CLI", "antigravity", &["agy"], "公式ドキュメントどおりに実装。実物では未確認"),
+        ("Qwen Code", "qwen", &["qwen"], "公式ドキュメントどおりに実装。実物では未確認"),
+    ];
+    let mut notes = vec![];
+    for (label, kind, bins, note) in rows {
+        let found = bins.iter().any(|b| on_path(b));
+        let reg = crate::setup::registered(kind);
+        let n = live(kind);
+        println!(
+            "  {:<16} {:<8} {:<8} {n}",
+            label,
+            if found { "あり" } else { "なし" },
+            match reg {
+                Some(true) => "済み",
+                Some(false) => "まだ",
+                None => "—",
+            }
+        );
+        if found && reg != Some(true) {
+            notes.push(format!("{label}: 入っていますが、nenwa が登録されていません。nenwa install を実行してください"));
+        } else if found && n == 0 {
+            notes.push(format!("{label}: 会話がまだ見えていません。登録のあとに開き直した会話だけが見えます。{note}"));
+        }
+    }
+    for name in ["grok", "muse"] {
+        if state::home().join("inbox").join(format!("{name}.json")).exists() || wake::load_wake(name).is_some() {
+            println!(
+                "  {:<16} {:<8} {:<8} {}",
+                format!("受信箱 {name}"),
+                "—",
+                "済み",
+                if wake::load_wake(name).is_some() {
+                    "届いたら webhook で起こす"
+                } else {
+                    "相手が check_inbox を呼んだときに届く"
+                }
+            );
+        }
+    }
+    if !notes.is_empty() {
+        println!();
+        for n in notes {
+            println!("  - {n}");
+        }
+    }
+}
+
 pub fn uninstall() {
     os::autostart_remove();
     quiet("claude", &["mcp", "remove", "-s", "user", "nenwa"]);

@@ -115,6 +115,8 @@ Claude Code に出るツールは 2 つ（Grok Bot など受信箱を持つ相�
 - Pi は 0.82.1 の RPC モードで、拡張の読み込み、登録、待機中の会話が動き出すこと、ツールの送り主がその会話になることを確かめた。
 - Gemini CLI、Antigravity CLI、Qwen Code、Copilot CLI は公式ドキュメントの仕様どおりに作ってあり、偽の入力でのテストだけ済んでいる。本物での確認はまだ。`settings.json` がコメント入りなどで読めないときは、書き換えずにそのままにする。
 - Codex はフックを信頼するまで動かさない。`install` のあとに開いたセッションで `/hooks` を開いて、nenwa のフックを信頼する。
+- Codex は、nenwa のツールを呼ぶたびに承認を求める（`codex exec` のような自動実行では呼べない）。承認なしにするかどうかは自分で決める。する場合は `~/.codex/config.toml` の `[mcp_servers.nenwa]` に `default_tools_approval_mode = "approve"` を足す。Codex が確認なしにほかのエージェントへ送れるようになる。`nenwa install` をやり直すと、この行は消える。
+- うまく届かないときは `nenwa doctor`。エージェントごとに、入っているか、nenwa が登録済みか、会話が見えているかを出す。
 - Cursor の `beforeSubmitPrompt` は会話に文章を足せないので、そこでは取り出さない。
 - フックはデーモンが動いていなければ何も出さずに終わる（エージェントの動きを止めない）。
 

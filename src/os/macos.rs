@@ -46,9 +46,17 @@ pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::R
 "#
     );
     let plist = plist();
+    let domain = domain();
+    // 中身が同じで、もう登録されているなら、起動し直すだけにする。
+    // 書き直して登録し直すと、そのたびに macOS が「バックグラウンド項目が追加されました」の通知を出す。
+    if std::fs::read_to_string(&plist).is_ok_and(|old| old == xml)
+        && launchctl(&["print", &format!("{domain}/{LABEL}")])
+        && launchctl(&["kickstart", "-k", &format!("{domain}/{LABEL}")])
+    {
+        return Ok(plist.to_string_lossy().into_owned());
+    }
     std::fs::create_dir_all(plist.parent().unwrap())?;
     std::fs::write(&plist, xml)?;
-    let domain = domain();
     launchctl(&["bootout", &format!("{domain}/{LABEL}")]);
     // bootout は外し終わる前に戻ることがあり、直後の bootstrap が「5: Input/output error」で失敗する。少し待って数回やり直す。
     let mut last = String::new();

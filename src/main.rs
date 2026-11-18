@@ -37,6 +37,7 @@ const USAGE: &str = "使い方（はじめては install.sh の 1 行で、導�
                                                    （初回はこのパソコンの中だけのネットワークを作る）
   nenwa grok <webhook の URL>                    Grok Bot をつなぐ（鍵は画面に出さずに入れる。Grok Bot に入れる値を表示）
   nenwa who                                      つながっているエージェントの一覧
+  nenwa doctor                                   エージェントごとに、入っているか・登録済みか・会話が見えているかを確かめる
   nenwa invite                                   自分の別のパソコンをつなぐ行を出す（ここで P2P をオンにする）
   nenwa join <招待> [--person 名前] [--machine 名前]
                                                    別のパソコンで: そのネットワークに入って install まで行う
@@ -121,6 +122,11 @@ fn hook(agent: Option<&String>, event: Option<&String>) -> ! {
 fn run() -> Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = if args.is_empty() { String::new() } else { args.remove(0) };
+    // `nenwa who | head` のように出力先が先に閉じたら、静かに終わる（デーモンは、切れた相手に書いても落ちないよう既定のまま）
+    #[cfg(unix)]
+    if cmd != "daemon" {
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
+    }
     match cmd.as_str() {
         "init" => {
             let c = new_config(&mut args, state::hex(&state::random_bytes::<32>()), false)?;
@@ -209,6 +215,7 @@ fn run() -> Result<()> {
             install::report_setup(args.iter().any(|a| a == "--remove"));
         }
         "uninstall" => install::uninstall(),
+        "doctor" => install::doctor(),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(if cmd.is_empty() { 0 } else { 1 });

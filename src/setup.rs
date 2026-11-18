@@ -448,14 +448,18 @@ fn setup_copilot(remove: bool) -> Option<SetupResult> {
 // Pi には MCP もコマンド型のフックもないので、ツールとフックの両方の役目をする拡張を 1 つ置く。
 const PI_EXTENSION: &str = include_str!("pi_extension.ts");
 
-fn setup_pi(remove: bool) -> Option<SetupResult> {
-    let dir = match std::env::var_os("NENWA_PI_DIR").filter(|d| !d.is_empty()) {
+fn pi_dir() -> PathBuf {
+    match std::env::var_os("NENWA_PI_DIR").filter(|d| !d.is_empty()) {
         Some(d) => PathBuf::from(d),
         None => match std::env::var_os("PI_CODING_AGENT_DIR").filter(|d| !d.is_empty()) {
             Some(x) => PathBuf::from(x),
             None => os::home_dir().join(".pi").join("agent"),
         },
-    };
+    }
+}
+
+fn setup_pi(remove: bool) -> Option<SetupResult> {
+    let dir = pi_dir();
     if !dir.exists() {
         return None;
     }
@@ -525,6 +529,31 @@ fn setup_antigravity(remove: bool) -> Option<SetupResult> {
         }
     }
     Some(SetupResult { agent: "antigravity", files: vec![mcp_file.display().to_string(), hooks_file.display().to_string()] })
+}
+
+// doctor 用: そのエージェントの設定に nenwa が入っているか。設定フォルダがなければ None。
+pub fn registered(agent: &str) -> Option<bool> {
+    let has = |file: PathBuf, needle: &str| std::fs::read_to_string(file).is_ok_and(|t| t.contains(needle));
+    // ほかのツールにも「hook codex」のような形のフックがあるので、nenwa の実行ファイルで終わるものだけを数える
+    let ours = |file: PathBuf, agent: &str| {
+        ["nenwa' hook", "nenwa\\\" hook", "nenwa.exe\\\" hook", "nenwa.exe' hook"]
+            .iter()
+            .any(|q| has(file.clone(), &format!("{q} {agent} ")))
+    };
+    let hooked = |dir: PathBuf, file: &str, agent: &str| dir.exists().then(|| ours(dir.join(file), agent));
+    match agent {
+        "codex" => hooked(dir_from("NENWA_CODEX_DIR", ".codex"), "hooks.json", "codex"),
+        "cursor" => hooked(dir_from("NENWA_CURSOR_DIR", ".cursor"), "hooks.json", "cursor"),
+        "gemini" => hooked(dir_from("NENWA_GEMINI_DIR", ".gemini"), "settings.json", "gemini"),
+        "qwen" => hooked(dir_from("NENWA_QWEN_DIR", ".qwen"), "settings.json", "qwen"),
+        "antigravity" => antigravity_dir().map(|d| ours(d.join("hooks.json"), "antigravity")),
+        "copilot" => Some(copilot_dir()).filter(|d| d.exists()).map(|d| d.join("hooks").join("nenwa.json").exists()),
+        "opencode" => Some(opencode_dir())
+            .filter(|d| d.exists())
+            .map(|d| d.join("plugins").join("nenwa.js").exists() || d.join("plugin").join("nenwa.js").exists()),
+        "pi" => Some(pi_dir()).filter(|d| d.exists()).map(|d| d.join("extensions").join("nenwa.ts").exists()),
+        _ => None,
+    }
 }
 
 pub fn setup_agents(remove: bool) -> Vec<SetupResult> {

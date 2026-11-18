@@ -1110,6 +1110,11 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert!(re(r"^'.*nenwa(\.exe)?' hook copilot stop$").is_match(ch["hooks"]["agentStop"][0]["bash"].as_str().unwrap()));
     assert!(re(r"^& '.*nenwa(\.exe)?' hook copilot stop$").is_match(ch["hooks"]["agentStop"][0]["powershell"].as_str().unwrap()));
 
+    let doc = cli(&h, &["doctor"]).unwrap();
+    assert!(re(r"Codex\s+\S+\s+済み").is_match(&doc), "{doc}");
+    assert!(re(r"Qwen Code\s+\S+\s+まだ").is_match(&doc), "読めなかった設定は未登録のまま: {doc}");
+    assert!(doc.contains("デーモン: 動いています"));
+
     cli(&h, &["setup", "--remove"]).unwrap();
     assert_eq!(read(gemini.join("settings.json")), gemini_before);
     assert_eq!(read(opencode.join("opencode.json")), opencode_before);

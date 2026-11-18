@@ -115,6 +115,8 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 - Pi was checked with 0.82.1 in RPC mode: the extension loads, the conversation is listed, a message starts an idle conversation, and the sender of a tool call is that conversation.
 - Gemini CLI, Antigravity CLI, Qwen Code and Copilot CLI support follows their official docs and is tested with fake input only; it has not been checked against the real tools yet. If `settings.json` cannot be parsed (comments, for example), it is left as it is.
 - Codex does not run hooks until you trust them. After `install`, open `/hooks` in a newly opened session and trust the nenwa hooks.
+- Codex asks for approval each time it calls a nenwa tool (so a non-interactive run such as `codex exec` cannot call them). Whether to drop that approval is your decision. To do so, add `default_tools_approval_mode = "approve"` under `[mcp_servers.nenwa]` in `~/.codex/config.toml`; Codex can then message other agents without asking you. Running `nenwa install` again removes that line.
+- When something does not arrive, run `nenwa doctor`. For each agent it shows whether it is installed, whether nenwa is registered, and whether a conversation is visible.
 - Cursor's `beforeSubmitPrompt` cannot add text to the conversation, so messages are not taken out there.
 - If the daemon is not running, the hooks exit without output (they never block the agent).
 
