@@ -65,7 +65,7 @@ impl<T> Remember<T> {
     }
 }
 
-// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI）の会話
+// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi）の会話
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Agent {
     pub agent: String,
@@ -352,7 +352,10 @@ impl Daemon {
         }
         let now = now_ms();
         let a = &mut st.agents.iter_mut().find(|(k, _)| *k == key)?.1;
-        a.status = status.into();
+        // 空なら今の状態のまま（待ち受けの呼び出しは、作業中かどうかを変えない）
+        if !status.is_empty() || a.status.is_empty() {
+            a.status = if status.is_empty() { "idle" } else { status }.into();
+        }
         a.seen = now;
         // 本体が入れ替わった（同じ会話を開き直した）ら、調べ直す
         if a.pid != 0 && !anc.contains(&a.pid) && !os::alive(a.pid) {
@@ -442,13 +445,14 @@ impl Daemon {
     // フックの出力。届いているメッセージがあれば、そのエージェントのやり方で会話に差し込む。
     async fn hook_event(&self, req: &Value) -> Result<Value> {
         let agent = req["agent"].as_str().unwrap_or("undefined");
-        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode" | "copilot") {
+        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode" | "copilot" | "pi") {
             bail!("unknown agent: {agent}");
         }
         let event = req["event"].as_str().unwrap_or("");
         let status = match event {
             "session-start" | "stop" => "idle",
             "session-end" => "offline",
+            "wait" => "",
             _ => "busy",
         };
         let Some(label) = self.touch_agent(&mut self.lock(), agent, &req["input"], status, pids(&req["ancestors"])) else {
@@ -458,9 +462,11 @@ impl Daemon {
             return Ok(Value::Null);
         }
         // Cursor の beforeSubmitPrompt は会話に足せないので、メッセージは次の postToolUse か stop まで取っておく。
-        // OpenCode のプラグインと Copilot CLI も、入力のときは会話に足せない。
-        let prompt = matches!(agent, "cursor" | "opencode" | "copilot") && event == "user-prompt-submit";
-        let mail = if prompt { vec![] } else { self.take_inbox(&label, 0.0, false).await? };
+        // OpenCode のプラグインと Copilot CLI も、入力のときは会話に足せない。Pi は待ち受けで受け取る。
+        let prompt = matches!(agent, "cursor" | "opencode" | "copilot" | "pi") && event == "user-prompt-submit";
+        // Pi の拡張は、会話が開いている間ここで届くのを待つ（待機中でも、届いたらそこで動き出す）
+        let wait = if agent == "pi" && event == "wait" { 25.0 } else { 0.0 };
+        let mail = if prompt { vec![] } else { self.take_inbox(&label, wait, false).await? };
         // OpenCode は始まったときに文脈を足す口がない（足すと、それだけで応答が始まってしまう）
         let intro = if event == "session-start" && agent != "opencode" {
             format!("nenwa: このセッションの宛先は {} です。", self.own(&label))
@@ -481,7 +487,7 @@ impl Daemon {
         if text.is_empty() {
             return Ok(if prompt && agent == "cursor" { json!({ "continue": true }) } else { Value::Null });
         }
-        if agent == "opencode" {
+        if matches!(agent, "opencode" | "pi") {
             return Ok(json!({ "text": text }));
         }
         if agent == "copilot" {

@@ -1,4 +1,4 @@
-// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI の設定に nenwa の MCP サーバーとフックを足す（外す）。
+// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi の設定に nenwa の MCP サーバーとフックを足す（外す）。
 // 書き換える前に一度だけ <ファイル>.bak-nenwa を残す。ほかのフックや MCP サーバーには触らない。
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -444,6 +444,31 @@ fn setup_copilot(remove: bool) -> Option<SetupResult> {
     Some(SetupResult { agent: "copilot", files: vec![mcp_file.display().to_string(), hooks_file.display().to_string()] })
 }
 
+// ---- Pi ----
+// Pi には MCP もコマンド型のフックもないので、ツールとフックの両方の役目をする拡張を 1 つ置く。
+const PI_EXTENSION: &str = include_str!("pi_extension.ts");
+
+fn setup_pi(remove: bool) -> Option<SetupResult> {
+    let dir = match std::env::var_os("NENWA_PI_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => match std::env::var_os("PI_CODING_AGENT_DIR").filter(|d| !d.is_empty()) {
+            Some(x) => PathBuf::from(x),
+            None => os::home_dir().join(".pi").join("agent"),
+        },
+    };
+    if !dir.exists() {
+        return None;
+    }
+    let file = dir.join("extensions").join("nenwa.ts");
+    if remove {
+        let _ = std::fs::remove_file(&file);
+    } else {
+        let _ = std::fs::create_dir_all(dir.join("extensions"));
+        let _ = std::fs::write(&file, PI_EXTENSION.replace("__NENWA_EXE__", &json!(exe().to_string_lossy()).to_string()));
+    }
+    Some(SetupResult { agent: "pi", files: vec![file.display().to_string()] })
+}
+
 pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
     [
         setup_codex(remove),
@@ -452,6 +477,7 @@ pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
         setup_settings_json("qwen", dir_from("NENWA_QWEN_DIR", ".qwen"), &QWEN_EVENTS, 10, remove),
         setup_opencode(remove),
         setup_copilot(remove),
+        setup_pi(remove),
     ]
     .into_iter()
     .flatten()

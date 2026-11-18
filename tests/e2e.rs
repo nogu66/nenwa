@@ -81,6 +81,8 @@ impl Home {
             "NENWA_OPENCODE_DIR",
             "NENWA_COPILOT_DIR",
             "COPILOT_HOME",
+            "NENWA_PI_DIR",
+            "PI_CODING_AGENT_DIR",
             "XDG_CONFIG_HOME",
             "NENWA_HTTP_PORT",
             "NENWA_HTTP_TTL_SECS",
@@ -869,6 +871,31 @@ fn opencode_手元のサーバーに送って会話に入れる_届かなけれ�
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains("alice/site-")));
 }
 
+// Pi: 拡張が「wait」で届くのを待つ。待っている間に届いたら、すぐ返る。
+fn pi_拡張の待ち受けに_届いたらすぐ渡す(c: &Ctx) {
+    let addr = "alice/tool-91ab@alice-mac";
+    let input = json!({ "session_id": "0c1d2e3f-4a5b-4c6d-8e7f-0000000091ab", "cwd": "/work/tool" });
+    let start = hook_call(&c.alice, "pi", "session-start", input.clone()).unwrap();
+    assert!(start["text"].as_str().unwrap().contains(&format!("宛先は {addr}")));
+    hook_call(&c.alice, "pi", "user-prompt-submit", input.clone());
+    until(|| who_has(&c.bob, &format!("{addr}  [busy]")).then_some(()));
+
+    let h = c.alice.clone();
+    let waiting_input = input.clone();
+    let waiter = std::thread::spawn(move || (Instant::now(), hook_call(&h, "pi", "wait", waiting_input)));
+    sleep(700);
+    assert!(who_has(&c.bob, &format!("{addr}  [busy]")), "待ち受けは状態を変えない");
+    let sent = Instant::now();
+    cli(&c.bob, &["send", addr, "待っている間に"]).unwrap();
+    let (_, got) = waiter.join().unwrap();
+    assert!(got.unwrap()["text"].as_str().unwrap().contains("待っている間に"));
+    assert!(sent.elapsed() < Duration::from_secs(5), "届いたらすぐ返る");
+
+    assert_eq!(hook_call(&c.alice, "pi", "stop", input.clone()), None);
+    hook_call(&c.alice, "pi", "session-end", input);
+    until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(addr)));
+}
+
 // Copilot CLI: 会話の ID は sessionId。文脈は additionalContext をいちばん上に置く。入力のときは足せない。
 fn copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く(c: &Ctx) {
     let addr = "alice/app-c0p1@alice-mac";
@@ -984,7 +1011,10 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     std::fs::write(copilot.join("hooks").join("other.json"), "{}").unwrap();
     let copilot_before = json!({ "mcpServers": { "other": { "type": "local", "command": "other", "tools": ["*"] } } });
     std::fs::write(copilot.join("mcp-config.json"), copilot_before.to_string()).unwrap();
+    let pi = c.root.join("pi-home");
+    std::fs::create_dir_all(&pi).unwrap();
     let h = c.alice.with(&[
+        ("NENWA_PI_DIR", &pi.display().to_string()),
         ("NENWA_COPILOT_DIR", &copilot.display().to_string()),
         ("NENWA_OPENCODE_DIR", &opencode.display().to_string()),
         ("NENWA_CODEX_DIR", &codex.display().to_string()),
@@ -1033,6 +1063,8 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     let plugin = std::fs::read_to_string(opencode.join("plugins").join("nenwa.js")).unwrap();
     assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&plugin), "実行ファイルの場所が入る");
     assert!(!plugin.contains("__NENWA_EXE__"));
+    let ext = std::fs::read_to_string(pi.join("extensions").join("nenwa.ts")).unwrap();
+    assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&ext));
     let cp = read(copilot.join("mcp-config.json"))["mcpServers"].clone();
     assert_eq!(cp["other"]["command"], "other");
     assert_eq!(
@@ -1053,6 +1085,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert!(!opencode.join("plugins").join("nenwa.js").exists());
     assert!(opencode.join("plugins").join("other.js").exists());
     assert_eq!(read(copilot.join("mcp-config.json")), copilot_before);
+    assert!(!pi.join("extensions").join("nenwa.ts").exists());
     assert!(!copilot.join("hooks").join("nenwa.json").exists());
     assert!(copilot.join("hooks").join("other.json").exists());
     assert_eq!(std::fs::read_to_string(codex.join("config.toml")).unwrap().trim(), toml.trim());
@@ -1164,6 +1197,7 @@ fn main() {
             "OpenCode: 手元のサーバーに送って会話に入れる。届かなければプラグインのフックで渡す",
             opencode_手元のサーバーに送って会話に入れる_届かなければプラグインのフックで渡す,
         ),
+        ("Pi: 拡張の待ち受けに、届いたらすぐ渡す", pi_拡張の待ち受けに_届いたらすぐ渡す),
         ("Copilot CLI: フックで宛先が決まり、ツールのあとと応答の終わりで届く", copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く),
         (
             "Gemini CLI と Qwen Code: フックで宛先が決まり、それぞれの形で届く",
