@@ -79,6 +79,8 @@ impl Home {
             "NENWA_GEMINI_DIR",
             "NENWA_QWEN_DIR",
             "NENWA_OPENCODE_DIR",
+            "NENWA_COPILOT_DIR",
+            "COPILOT_HOME",
             "XDG_CONFIG_HOME",
             "NENWA_HTTP_PORT",
             "NENWA_HTTP_TTL_SECS",
@@ -867,6 +869,25 @@ fn opencode_手元のサーバーに送って会話に入れる_届かなけれ�
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains("alice/site-")));
 }
 
+// Copilot CLI: 会話の ID は sessionId。文脈は additionalContext をいちばん上に置く。入力のときは足せない。
+fn copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く(c: &Ctx) {
+    let addr = "alice/app-c0p1@alice-mac";
+    let input = json!({ "sessionId": "5a6b7c8d-0000-4000-8000-00000000c0p1", "cwd": "/work/app", "timestamp": 1795000000000u64 });
+    let start = hook_call(&c.alice, "copilot", "session-start", input.clone()).unwrap();
+    assert!(start["additionalContext"].as_str().unwrap().contains(&format!("宛先は {addr}")));
+    assert_eq!(cli_json(&c.bob, &["send", addr, "ツールのあとに"])["state"], "inbox");
+    assert_eq!(hook_call(&c.alice, "copilot", "user-prompt-submit", input.clone()), None);
+    let tool = hook_call(&c.alice, "copilot", "post-tool-use", input.clone()).unwrap();
+    assert!(tool["additionalContext"].as_str().unwrap().contains("ツールのあとに"));
+    cli(&c.bob, &["send", addr, "止まる前に"]).unwrap();
+    let stop = hook_call(&c.alice, "copilot", "stop", input.clone()).unwrap();
+    assert_eq!(stop["decision"], "block");
+    assert!(stop["reason"].as_str().unwrap().contains("止まる前に"));
+    assert_eq!(hook_call(&c.alice, "copilot", "stop", input.clone()), None);
+    hook_call(&c.alice, "copilot", "session-end", input);
+    until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(addr)));
+}
+
 const GEMINI_ID: &str = "7d1e2f3a-aaaa-bbbb-cccc-00000000f00d";
 const GEMINI_ADDR: &str = "alice/docs-f00d@alice-mac";
 
@@ -958,7 +979,13 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     std::fs::write(opencode.join("plugins").join("other.js"), "// other").unwrap();
     let opencode_before = json!({ "mcp": { "other": { "type": "local", "command": ["other"] } } });
     std::fs::write(opencode.join("opencode.json"), opencode_before.to_string()).unwrap();
+    let copilot = c.root.join("copilot-home");
+    std::fs::create_dir_all(copilot.join("hooks")).unwrap();
+    std::fs::write(copilot.join("hooks").join("other.json"), "{}").unwrap();
+    let copilot_before = json!({ "mcpServers": { "other": { "type": "local", "command": "other", "tools": ["*"] } } });
+    std::fs::write(copilot.join("mcp-config.json"), copilot_before.to_string()).unwrap();
     let h = c.alice.with(&[
+        ("NENWA_COPILOT_DIR", &copilot.display().to_string()),
         ("NENWA_OPENCODE_DIR", &opencode.display().to_string()),
         ("NENWA_CODEX_DIR", &codex.display().to_string()),
         ("NENWA_CURSOR_DIR", &cursor.display().to_string()),
@@ -1006,12 +1033,28 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     let plugin = std::fs::read_to_string(opencode.join("plugins").join("nenwa.js")).unwrap();
     assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&plugin), "実行ファイルの場所が入る");
     assert!(!plugin.contains("__NENWA_EXE__"));
+    let cp = read(copilot.join("mcp-config.json"))["mcpServers"].clone();
+    assert_eq!(cp["other"]["command"], "other");
+    assert_eq!(
+        cp["nenwa"],
+        json!({ "type": "local", "command": cp["nenwa"]["command"], "args": ["mcp", "--agent", "copilot"], "tools": ["*"] })
+    );
+    let ch = read(copilot.join("hooks").join("nenwa.json"));
+    assert_eq!(ch["version"], 1);
+    let mut keys: Vec<&String> = ch["hooks"].as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["agentStop", "postToolUse", "sessionEnd", "sessionStart", "userPromptSubmitted"]);
+    assert!(re(r"^'.*nenwa(\.exe)?' hook copilot stop$").is_match(ch["hooks"]["agentStop"][0]["bash"].as_str().unwrap()));
+    assert!(re(r"^& '.*nenwa(\.exe)?' hook copilot stop$").is_match(ch["hooks"]["agentStop"][0]["powershell"].as_str().unwrap()));
 
     cli(&h, &["setup", "--remove"]).unwrap();
     assert_eq!(read(gemini.join("settings.json")), gemini_before);
     assert_eq!(read(opencode.join("opencode.json")), opencode_before);
     assert!(!opencode.join("plugins").join("nenwa.js").exists());
     assert!(opencode.join("plugins").join("other.js").exists());
+    assert_eq!(read(copilot.join("mcp-config.json")), copilot_before);
+    assert!(!copilot.join("hooks").join("nenwa.json").exists());
+    assert!(copilot.join("hooks").join("other.json").exists());
     assert_eq!(std::fs::read_to_string(codex.join("config.toml")).unwrap().trim(), toml.trim());
     assert_eq!(read(codex.join("hooks.json"))["hooks"], json!({ "PostToolUse": [other_hook] }));
     assert_eq!(read(cursor.join("mcp.json"))["mcpServers"], json!({ "other": { "command": "other" } }));
@@ -1121,6 +1164,7 @@ fn main() {
             "OpenCode: 手元のサーバーに送って会話に入れる。届かなければプラグインのフックで渡す",
             opencode_手元のサーバーに送って会話に入れる_届かなければプラグインのフックで渡す,
         ),
+        ("Copilot CLI: フックで宛先が決まり、ツールのあとと応答の終わりで届く", copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く),
         (
             "Gemini CLI と Qwen Code: フックで宛先が決まり、それぞれの形で届く",
             gemini_cliとqwen_code_フックで宛先が決まり_それぞれの形で届く,

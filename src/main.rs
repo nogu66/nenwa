@@ -51,9 +51,9 @@ const USAGE: &str = "使い方（はじめては install.sh の 1 行で、導�
                                                    HTTP の入り口を Tailscale Funnel で開く（既定は 2 時間で閉じる。0 なら閉じない）
   nenwa muse --off                               Muse の入り口と Funnel を閉じ、鍵を消す（受信箱の中身は残す）
   nenwa daemon                                   デーモンを前で動かす（ふつうは自動で起動）
-  nenwa mcp [--as 受信箱 | --agent <名前>]        MCP サーバー（各エージェントが起動する。名前は codex、cursor、gemini、qwen、opencode）
+  nenwa mcp [--as 受信箱 | --agent <名前>]        MCP サーバー（各エージェントが起動する。名前は codex、cursor、gemini、qwen、opencode、copilot）
   nenwa hook <名前> <イベント>                    フック（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode のプラグインが起動する）
-  nenwa setup [--remove]                         Codex、Cursor、Gemini CLI、Qwen Code、OpenCode への登録だけをやり直す（外す）
+  nenwa setup [--remove]                         入っているエージェント（Codex、Cursor、OpenCode、Gemini CLI、Qwen Code、Copilot CLI）への登録だけをやり直す（外す）
   nenwa uninstall                                自動起動と各エージェントへの登録を外す（チームと受信箱は残す）";
 
 // --名前 値 を取り出す。値がなければそのまま残す。

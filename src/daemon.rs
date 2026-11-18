@@ -65,7 +65,7 @@ impl<T> Remember<T> {
     }
 }
 
-// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode）の会話
+// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI）の会話
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Agent {
     pub agent: String,
@@ -317,8 +317,10 @@ impl Daemon {
 
     fn touch_agent(&self, st: &mut St, agent: &str, input: &Value, status: &str, anc: Vec<i64>) -> Option<String> {
         let mut id = js_str(&input["session_id"]);
-        if id.is_empty() {
-            id = js_str(&input["conversation_id"]);
+        for k in ["conversation_id", "sessionId"] {
+            if id.is_empty() {
+                id = js_str(&input[k]);
+            }
         }
         if id.is_empty() {
             return None;
@@ -440,7 +442,7 @@ impl Daemon {
     // フックの出力。届いているメッセージがあれば、そのエージェントのやり方で会話に差し込む。
     async fn hook_event(&self, req: &Value) -> Result<Value> {
         let agent = req["agent"].as_str().unwrap_or("undefined");
-        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode") {
+        if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode" | "copilot") {
             bail!("unknown agent: {agent}");
         }
         let event = req["event"].as_str().unwrap_or("");
@@ -456,8 +458,8 @@ impl Daemon {
             return Ok(Value::Null);
         }
         // Cursor の beforeSubmitPrompt は会話に足せないので、メッセージは次の postToolUse か stop まで取っておく。
-        // OpenCode のプラグインも、入力のときは会話の登録だけをする。
-        let prompt = matches!(agent, "cursor" | "opencode") && event == "user-prompt-submit";
+        // OpenCode のプラグインと Copilot CLI も、入力のときは会話に足せない。
+        let prompt = matches!(agent, "cursor" | "opencode" | "copilot") && event == "user-prompt-submit";
         let mail = if prompt { vec![] } else { self.take_inbox(&label, 0.0, false).await? };
         // OpenCode は始まったときに文脈を足す口がない（足すと、それだけで応答が始まってしまう）
         let intro = if event == "session-start" && agent != "opencode" {
@@ -481,6 +483,9 @@ impl Daemon {
         }
         if agent == "opencode" {
             return Ok(json!({ "text": text }));
+        }
+        if agent == "copilot" {
+            return Ok(if event == "stop" { json!({ "decision": "block", "reason": text }) } else { json!({ "additionalContext": text }) });
         }
         // Codex、Qwen Code、Gemini CLI は Claude Code と同じ形。Gemini だけイベントの名前と、続けさせるときの言葉が違う。
         if agent != "cursor" {

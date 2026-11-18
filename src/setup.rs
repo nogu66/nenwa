@@ -1,4 +1,4 @@
-// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode の設定に nenwa の MCP サーバーとフックを足す（外す）。
+// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI の設定に nenwa の MCP サーバーとフックを足す（外す）。
 // 書き換える前に一度だけ <ファイル>.bak-nenwa を残す。ほかのフックや MCP サーバーには触らない。
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
@@ -369,6 +369,81 @@ fn setup_opencode(remove: bool) -> Option<SetupResult> {
     Some(SetupResult { agent: "opencode", files: vec![file.display().to_string(), plugin.display().to_string()] })
 }
 
+// ---- GitHub Copilot CLI ----
+// フックは ~/.copilot/hooks/ の中の *.json がすべて読まれるので、自分のファイルを 1 つ置く。MCP は mcp-config.json に足す。
+const COPILOT_EVENTS: [(&str, &str); 5] = [
+    ("sessionStart", "session-start"),
+    ("userPromptSubmitted", "user-prompt-submit"),
+    ("postToolUse", "post-tool-use"),
+    ("agentStop", "stop"),
+    ("sessionEnd", "session-end"),
+];
+
+fn copilot_dir() -> PathBuf {
+    match std::env::var_os("NENWA_COPILOT_DIR").filter(|d| !d.is_empty()) {
+        Some(d) => PathBuf::from(d),
+        None => match std::env::var_os("COPILOT_HOME").filter(|d| !d.is_empty()) {
+            Some(x) => PathBuf::from(x),
+            None => os::home_dir().join(".copilot"),
+        },
+    }
+}
+
+fn setup_copilot(remove: bool) -> Option<SetupResult> {
+    let dir = copilot_dir();
+    if !dir.exists() {
+        return None;
+    }
+    let mcp_file = dir.join("mcp-config.json");
+    let mut mcp = match std::fs::read_to_string(&mcp_file) {
+        Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
+            Ok(Value::Object(m)) => m,
+            _ => {
+                eprintln!("copilot: {} を読めなかったので、そのままにしました", mcp_file.display());
+                return None;
+            }
+        },
+        _ => Map::new(),
+    };
+    let before = mcp.clone();
+    if remove {
+        if let Some(servers) = mcp.get_mut("mcpServers").and_then(Value::as_object_mut) {
+            servers.remove("nenwa");
+        }
+    } else {
+        ensure_obj(&mut mcp, "mcpServers").insert(
+            "nenwa".into(),
+            json!({ "type": "local", "command": exe().to_string_lossy(), "args": ["mcp", "--agent", "copilot"], "tools": ["*"] }),
+        );
+    }
+    if mcp != before {
+        backup(&mcp_file);
+        write_json(&mcp_file, &mcp);
+    }
+    let hooks_file = dir.join("hooks").join("nenwa.json");
+    if remove {
+        let _ = std::fs::remove_file(&hooks_file);
+    } else {
+        let path = exe().to_string_lossy().into_owned();
+        let (sh, ps) = (format!("'{}'", path.replace('\'', "'\\''")), format!("& '{}'", path.replace('\'', "''")));
+        let hooks: Map<String, Value> = COPILOT_EVENTS
+            .iter()
+            .map(|(event, name)| {
+                let h = json!({
+                    "type": "command",
+                    "bash": format!("{sh} hook copilot {name}"),
+                    "powershell": format!("{ps} hook copilot {name}"),
+                    "timeoutSec": 10
+                });
+                (event.to_string(), json!([h]))
+            })
+            .collect();
+        let _ = std::fs::create_dir_all(dir.join("hooks"));
+        write_json(&hooks_file, &Map::from_iter([("version".to_string(), json!(1)), ("hooks".to_string(), Value::Object(hooks))]));
+    }
+    Some(SetupResult { agent: "copilot", files: vec![mcp_file.display().to_string(), hooks_file.display().to_string()] })
+}
+
 pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
     [
         setup_codex(remove),
@@ -376,6 +451,7 @@ pub fn setup_agents(remove: bool) -> Vec<SetupResult> {
         setup_settings_json("gemini", dir_from("NENWA_GEMINI_DIR", ".gemini"), &GEMINI_EVENTS, 10_000, remove),
         setup_settings_json("qwen", dir_from("NENWA_QWEN_DIR", ".qwen"), &QWEN_EVENTS, 10, remove),
         setup_opencode(remove),
+        setup_copilot(remove),
     ]
     .into_iter()
     .flatten()
