@@ -48,7 +48,8 @@ try {
   Remove-Item -Recurse -Force -Path $tmp -ErrorAction SilentlyContinue
 }
 
-$cmd = if ($args.Count -gt 0) { @($args) } else { @('install') }
+# An if-expression unwraps a one-element array into a string, and splatting a string passes it one character at a time.
+[string[]]$cmd = if ($args.Count -gt 0) { $args } else { 'install' }
 if ($env:NENWA_INSTALL_DRY_RUN) {
   Write-Host "Would run (NENWA_INSTALL_DRY_RUN is set): $exe $($cmd -join ' ')"
 } else {

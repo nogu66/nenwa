@@ -19,6 +19,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal -c rustfmt,clippy && rustup default stable
@@ -26,6 +27,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
+        # 止まったテストがあると 6 時間走り続けるので、ここで打ち切って下の手順でログを出す
+        timeout-minutes: 20
         env:
           NENWA_TEST_KEEP: "1"
       - name: daemon logs on failure
@@ -43,6 +46,7 @@ jobs:
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
           - { target: x86_64-pc-windows-msvc, os: windows-latest }
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
