@@ -19,7 +19,7 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
-// Windows は進め方の 3 で埋める: 名前付きパイプ（\\.\pipe\nenwa-<ユーザー>）、OpenProcess、Toolhelp、
-// schtasks、"…" の囲み。
 #[cfg(windows)]
-compile_error!("Windows にはまだ対応していません");
+mod windows;
+#[cfg(windows)]
+pub use windows::*;

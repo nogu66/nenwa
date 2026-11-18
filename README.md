@@ -1,19 +1,27 @@
 # nenwa
 
-自分のエージェント同士（Claude Code、Codex、Cursor、Grok Bot）がメッセージを送り合えるようにする小さなツール。たとえば Claude Code に「Codex にこの API の型を聞いて」と頼むと、Codex の会話に届き、返事が Claude Code に戻ってくる。1 つの実行ファイルで動く（Node.js は要らない）。今は macOS で確かめている。
+自分のエージェント同士（Claude Code、Codex、Cursor、Grok Bot）がメッセージを送り合えるようにする小さなツール。たとえば Claude Code に「Codex にこの API の型を聞いて」と頼むと、Codex の会話に届き、返事が Claude Code に戻ってくる。1 つの実行ファイルで動く（Node.js は要らない）。Mac、Linux、Windows で動く。
 
 名前は「念話」（離れた仲間と心で話す、アニメでおなじみの力）から。
 
 ## 入れ方
 
+Mac と Linux:
+
 ```sh
 curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh | bash
 ```
 
-これだけで、実行ファイルを `~/.local/bin/nenwa` に置き（SHA256 を確かめる）、続けて `nenwa install` まで行う。以降のコマンドは `nenwa` で使える。`install` は次をまとめて行う。
+Windows（PowerShell）:
+
+```powershell
+irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1 | iex
+```
+
+これだけで、実行ファイルを置き（Mac と Linux は `~/.local/bin/nenwa`、Windows は `%LOCALAPPDATA%\nenwa\nenwa.exe`。どちらも SHA256 を確かめる）、続けて `nenwa install` まで行う。以降のコマンドは `nenwa` で使える。`install` は次をまとめて行う。
 
 - このパソコンの中だけのネットワークを作る（外とはつながない）
-- ログイン時にデーモンが起動するようにする（launchd）
+- ログイン時にデーモンが起動するようにする（Mac は launchd、Linux は `systemd --user`、Windows はタスク スケジューラ）
 - 入っているエージェントに登録する: Claude Code（MCP）、Codex（MCP とフック）、Cursor（MCP とフック）。書き換える前の設定ファイルは `.bak-nenwa` に残す
 
 そのあと:
@@ -39,7 +47,17 @@ nenwa send nogu/api-c0de@mac "型を教えて"
 nenwa inbox                 # ターミナルから送った分への返事
 ```
 
-自分の別のパソコンもつなぐときは、1 台目で `nenwa invite` を実行し、出てきた行（上の 1 行の末尾に `-s -- join <招待>` が付いたもの）を 2 台目で実行する（ここで P2P がオンになる）。
+自分の別のパソコンもつなぐときは、1 台目で `nenwa invite` を実行し、出てきた行を 2 台目で実行する（ここで P2P がオンになる）。`invite` は 1 台目と同じ OS の形の行を出す。2 台目の OS が違うときは、招待の文字列をもう一方の形に入れ替える。
+
+```sh
+# Mac と Linux
+curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh | bash -s -- join <招待>
+```
+
+```powershell
+# Windows
+& ([scriptblock]::Create((irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1))) join <招待>
+```
 
 [reason-network](https://github.com/reason-machines/reason-network) と同じ考え方（パソコンごとのデーモンが P2P でつながり、エージェントは MCP で送る）を、手元で動くエージェントと Grok Bot に絞って作り直したもの。コードは写していない。
 
@@ -141,12 +159,14 @@ nenwa send --as grok --reply-to <id> <宛先> "<返事>"
 
 ## 開発
 
-Rust で書いている（`src/*.rs`。OS ごとの違いは `src/os/` に閉じ込めてある）。
+Rust で書いている（`src/*.rs`）。OS ごとの違いは `src/os/` に閉じ込めてある（`unix.rs` は Mac と Linux の共通、`macos.rs`、`linux.rs`、`windows.rs`）。
 
 ```sh
 cargo build --release      # target/release/nenwa
 target/release/nenwa who
 ```
+
+入れるためのスクリプトは `scripts/install.sh` と `scripts/install.ps1`。`NENWA_DOWNLOAD_BASE` で落とす場所を手元のフォルダに変えられ、`NENWA_INSTALL_DRY_RUN=1` なら実行ファイルを置くだけで、実行するコマンドを表示して終わる。
 
 ## テスト
 
@@ -154,18 +174,22 @@ target/release/nenwa who
 cargo test
 ```
 
-`src/` の中の小さなテスト（HMAC、枠の抜け出し、宛先の形、招待の文字列など）と、`tests/e2e.rs` の通しのテストが動く。通しのテストは、ビルドした実行ファイルを一時フォルダの `NENWA_HOME` と `HOME` で動かすので、本物の `~/.nenwa` や `~/.claude` には触らない。
+`src/` の中の小さなテスト（HMAC、枠の抜け出し、宛先の形、招待の文字列など）と、`tests/e2e.rs` の通しのテストが動く。通しのテストは、ビルドした実行ファイルを一時フォルダの `NENWA_HOME` と `HOME`（Windows は `USERPROFILE`）で動かすので、本物の `~/.nenwa` や `~/.claude` には触らない。
 
-2 人分のデーモン（`NENWA_RELAY=disabled` で relay も DNS も使わず、招待の LAN の住所でつなぐ）と偽の Claude Code セッション、偽の webhook と偽の codex を立て、一覧・配送・いない宛先・受信箱（webhook で起こす、起こし直さない、待ちながら読む、受信箱の名前で返事、terminal への返事、MCP のツールの出し分け）・Cursor と Codex のフック（宛先、差し込み、stop での続き、codex queue とその失敗、MCP の送り主、デーモンがないとき）・setup と --remove・オフライン時の再送・P2P オフでの配送と invite を確かめる。10 秒ほどで終わる。ログを見たいときは `NENWA_TEST_KEEP=1 cargo test` で一時フォルダを残す。
+2 人分のデーモン（`NENWA_RELAY=disabled` で relay も DNS も使わず、招待の LAN の住所でつなぐ）と偽の Claude Code セッション（Windows は名前付きパイプ）、偽の webhook と偽の codex を立て、一覧・配送・いない宛先・受信箱（webhook で起こす、起こし直さない、待ちながら読む、受信箱の名前で返事、terminal への返事、MCP のツールの出し分け）・Cursor と Codex のフック（宛先、差し込み、stop での続き、codex queue とその失敗、MCP の送り主、デーモンがないとき）・setup と --remove・オフライン時の再送・P2P オフでの配送と invite を確かめる。10 秒ほどで終わる。ログを見たいときは `NENWA_TEST_KEEP=1 cargo test` で一時フォルダを残す。
+
+GitHub Actions（`.github/workflows/ci.yml`）は、Linux と Windows で fmt、clippy、テストを流し、配る実行ファイル（Linux の musl 2 種類と Windows）を作って成果物に残す。Mac は手元で流す。
 
 ## 削ったもの
 
-Claude Code・Codex・Cursor・Grok Bot 以外のエージェント（Gemini CLI や opencode なども、`mcp --as <名前>` の受信箱なら同じ形でつなげる。届くのは自分で check_inbox したとき）、署名つきの名簿、アカウントでのサインイン、ファイル添付、承認のポップアップ（`ask_user`）、メニューバー表示、自前のリレー。Linux と Windows はこれから。
+Claude Code・Codex・Cursor・Grok Bot 以外のエージェント（Gemini CLI や opencode なども、`mcp --as <名前>` の受信箱なら同じ形でつなげる。届くのは自分で check_inbox したとき）、署名つきの名簿、アカウントでのサインイン、ファイル添付、承認のポップアップ（`ask_user`）、メニューバー表示、自前のリレー。
 
 ## 気をつけること
 
 - `messagingSocketPath` は Claude Code の文書化された機能ではない。Claude Code の更新で変わることがある（2.1.32x で確認）。
 - 権限確認を飛ばすモードのセッションでは、知らない送り主からの書き込みが Claude Code の `crossSessionInbound` 設定で保留されることがある。届かないときはまずここを見る。
 - 相手探しには n0 の公開の DNS と relay を使う。本文は暗号化されるが、どの鍵がどの relay にいるかは n0 から見える。n0 の relay は開発向けで回数の制限がある（個人の数台なら足りる）。
+- Windows の Claude Code が `messagingSocketPath` に名前付きパイプ（`\\.\pipe\…`）を書くかは、まだ確かめていない。nenwa はそう書かれていれば名前付きパイプに送る。
+- Windows の自動起動は、`NENWA_HOME` がふつうの場所（`%USERPROFILE%\.nenwa`）のときだけ使える（タスク スケジューラは環境変数を渡せない）。
 - メンバーを外す仕組みはない。外すときはチーム鍵を作り直して（`init`）、残る人だけに招待を配り直す。
 - 相手のセッションが閉じていると届かない（`no_session`）。オフラインのパソコン宛ては貯めるが、閉じたセッション宛ては貯めない。

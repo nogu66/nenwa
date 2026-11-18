@@ -45,7 +45,7 @@ pub fn wake_dir() -> PathBuf {
 
 // 動いている実行ファイルの場所。フック、MCP、自動起動の登録に書く。
 pub fn exe() -> PathBuf {
-    std::env::current_exe().ok().and_then(|p| p.canonicalize().ok()).unwrap_or_else(|| PathBuf::from("nenwa"))
+    os::exe_path().unwrap_or_else(|| PathBuf::from("nenwa"))
 }
 
 #[derive(Serialize, Deserialize, Clone)]

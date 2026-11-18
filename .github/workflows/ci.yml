@@ -1,0 +1,108 @@
+# Linux と Windows で fmt、clippy、テストを流し、配る実行ファイルを作る（Release は作らない。成果物として残すだけ）。
+# Mac は Actions だと 10 倍に数えられるので、手元で確かめる。
+name: ci
+
+on:
+  push:
+    branches: [main, rust]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal -c rustfmt,clippy && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+        env:
+          NENWA_TEST_KEEP: "1"
+      - name: daemon logs on failure
+        if: failure()
+        shell: bash
+        run: find "${RUNNER_TEMP:-/tmp}" "${TMPDIR:-/tmp}" -path '*nenwa-e2e-*' -name '*.log' 2>/dev/null | while read -r f; do echo "== $f"; cat "$f"; done
+
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir dist
+          tar -czf dist/nenwa-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release nenwa
+          (cd dist && sha256sum nenwa-*.tar.gz > SHA256SUMS && cat SHA256SUMS)
+          file target/${{ matrix.target }}/release/nenwa
+      - name: install.sh (dry run)
+        if: runner.os == 'Linux'
+        run: |
+          home="$RUNNER_TEMP/install-home"
+          out=$(HOME="$home" NENWA_DOWNLOAD_BASE=dist NENWA_INSTALL_DRY_RUN=1 bash scripts/install.sh join TEST)
+          echo "$out"
+          echo "$out" | grep -q "/.local/bin/nenwa join TEST"
+          "$home/.local/bin/nenwa" 2>&1 | head -1
+
+      - name: package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Compress-Archive -Path target/${{ matrix.target }}/release/nenwa.exe -DestinationPath dist/nenwa-${{ matrix.target }}.zip
+          $h = (Get-FileHash -Algorithm SHA256 dist/nenwa-${{ matrix.target }}.zip).Hash.ToLower()
+          "$h  nenwa-${{ matrix.target }}.zip" | Set-Content -Encoding ascii dist/SHA256SUMS
+          Get-Content dist/SHA256SUMS
+      - name: install.ps1 (dry run, then a real install and uninstall on this throwaway runner)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:LOCALAPPDATA = Join-Path $env:RUNNER_TEMP 'appdata'
+          $env:NENWA_DOWNLOAD_BASE = (Resolve-Path dist).Path
+          $env:NENWA_INSTALL_DRY_RUN = '1'
+          $out = & ([scriptblock]::Create((Get-Content -Raw scripts/install.ps1))) join TEST 6>&1 | Out-String
+          $out
+          if ($out -notmatch 'nenwa\.exe join TEST') { throw 'install.ps1 did not pass the args through' }
+          Remove-Item Env:NENWA_INSTALL_DRY_RUN
+          & ([scriptblock]::Create((Get-Content -Raw scripts/install.ps1)))
+          if ($LASTEXITCODE) { throw "nenwa install failed: $LASTEXITCODE" }
+          $exe = Join-Path $env:LOCALAPPDATA 'nenwa\nenwa.exe'
+          schtasks /Query /TN nenwa /V /FO LIST
+          if ($LASTEXITCODE) { throw 'scheduled task missing' }
+          & $exe who
+          if ($LASTEXITCODE) { throw "nenwa who failed: $LASTEXITCODE" }
+          & $exe uninstall
+          schtasks /Query /TN nenwa 2>$null
+          if (-not $LASTEXITCODE) { throw 'scheduled task still there after uninstall' }
+          $global:LASTEXITCODE = 0
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nenwa-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error

@@ -13,7 +13,7 @@ fn launchctl(args: &[&str]) -> bool {
 }
 
 fn domain() -> String {
-    format!("gui/{}", super::uid())
+    format!("gui/{}", unsafe { libc::getuid() })
 }
 
 pub fn parent_pid(pid: i64) -> Option<i64> {

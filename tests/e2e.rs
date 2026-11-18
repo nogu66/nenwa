@@ -1,13 +1,13 @@
 // 1 台の上で 2 人分（alice と bob）のデーモンを立て、偽の Claude Code セッションに届くまでを確かめる。
 // テストは前のテストの状態を使うので、書いた順に 1 つずつ動かす（自前の小さなランナー。Cargo.toml の harness = false）。
-// 本物のホームには何も書かない: NENWA_HOME、HOME、CLAUDE_CONFIG_DIR をすべて一時フォルダに向け、P2P は NENWA_RELAY=disabled。
+// 本物のホームには何も書かない: NENWA_HOME、HOME（Windows は USERPROFILE）、CLAUDE_CONFIG_DIR をすべて一時フォルダに向け、
+// P2P は NENWA_RELAY=disabled。偽の Claude Code セッションは、Mac と Linux は unix ソケット、Windows は名前付きパイプ。
+use interprocess::local_socket::{GenericFilePath, ListenerOptions, Stream as LocalStream, ToFsName, prelude::*};
 use regex::Regex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
-use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -24,9 +24,31 @@ fn re(p: &str) -> Regex {
 }
 
 fn rand_hex(n: usize) -> String {
-    let mut b = vec![0u8; n];
-    std::fs::File::open("/dev/urandom").unwrap().read_exact(&mut b).unwrap();
-    b.iter().map(|x| format!("{x:02x}")).collect()
+    (0..n).map(|_| format!("{:02x}", rand::random::<u8>())).collect()
+}
+
+// デーモンの手元の通信の場所（src/os と同じ決め方）
+fn daemon_sock(h: &Home) -> String {
+    if cfg!(windows) {
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(h.get("NENWA_HOME").as_bytes());
+        let hex: String = hash.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        format!(r"\\.\pipe\nenwa-{}-{hex}", std::env::var("USERNAME").unwrap_or_default())
+    } else {
+        h.home.join("sock").display().to_string()
+    }
+}
+
+fn local_connect(path: &str) -> std::io::Result<LocalStream> {
+    LocalStream::connect(path.to_fs_name::<GenericFilePath>()?)
+}
+
+// デーモンに shutdown を頼む（自動で起動したものは pid が分からないので、こちらで止める）
+fn shutdown(h: &Home) {
+    if let Ok(mut s) = local_connect(&daemon_sock(h)) {
+        let _ = s.write_all(b"{\"op\":\"shutdown\"}\n");
+        let _ = s.read_to_string(&mut String::new());
+    }
 }
 
 #[derive(Clone)]
@@ -89,6 +111,7 @@ fn make_home(root: &Path, fake_codex: &Path, team_key: &str, name: &str, config:
     let env = vec![
         ("NENWA_HOME", p(&home)),
         ("HOME", p(&home.join("fake-home"))),
+        ("USERPROFILE", p(&home.join("fake-home"))),
         ("CLAUDE_CONFIG_DIR", p(&claude)),
         ("CLAUDE_CODE_SESSION_ID", String::new()),
         ("NENWA_RELAY", "disabled".into()),
@@ -181,15 +204,22 @@ impl Session {
 }
 
 fn fake_session(h: &Home, folder: &str, session_id: &str) -> Session {
-    let sock = h.home.join(format!("{folder}.sock"));
-    let listener = UnixListener::bind(&sock).unwrap();
+    let sock = if cfg!(windows) {
+        format!(r"\\.\pipe\nenwa-test-{}-{folder}", rand_hex(6))
+    } else {
+        h.home.join(format!("{folder}.sock")).display().to_string()
+    };
+    let listener = ListenerOptions::new().name(sock.as_str().to_fs_name::<GenericFilePath>().unwrap()).create_sync().unwrap();
     let got = Arc::new(Mutex::new(vec![]));
     let g = got.clone();
     std::thread::spawn(move || {
         for mut c in listener.incoming().flatten() {
-            let mut buf = String::new();
-            let _ = c.read_to_string(&mut buf);
-            g.lock().unwrap().push(serde_json::from_str(&buf).unwrap());
+            // 相手が閉じるまで読む（Windows のパイプは閉じるとエラーで返る）
+            let (mut buf, mut chunk) = (vec![], [0u8; 4096]);
+            while let Ok(n @ 1..) = c.read(&mut chunk) {
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            g.lock().unwrap().push(serde_json::from_slice(&buf).unwrap());
         }
     });
     let pid = std::process::id();
@@ -203,9 +233,13 @@ fn start_daemon(h: &Home) -> Child {
     h.command(&["daemon"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().unwrap()
 }
 
-// SIGTERM で止める（デーモンは仲間とのつながりを閉じてから終わる）
-fn stop_daemon(mut p: Child) {
-    let _ = Command::new("kill").arg("-TERM").arg(p.id().to_string()).status();
+// SIGTERM で止める（デーモンは仲間とのつながりを閉じてから終わる）。Windows は shutdown を頼む。
+fn stop_daemon(mut p: Child, h: &Home) {
+    if cfg!(windows) {
+        shutdown(h);
+    } else {
+        let _ = Command::new("kill").arg("-TERM").arg(p.id().to_string()).status();
+    }
     let end = Instant::now() + Duration::from_secs(10);
     while Instant::now() < end {
         if let Ok(Some(_)) = p.try_wait() {
@@ -253,14 +287,8 @@ fn before() -> Ctx {
     let root = std::env::temp_dir().join(format!("nenwa-e2e-{}-{}", std::process::id(), rand_hex(3)));
     std::fs::create_dir_all(&root).unwrap();
     let team_key = rand_hex(32);
-    // 偽の codex: queue に渡された引数を記録する。codex-fail があれば失敗する。
-    let fake_codex = root.join("fake-codex");
-    std::fs::write(
-        &fake_codex,
-        "#!/bin/sh\nif [ -f \"$FAKE_CODEX_FAIL\" ]; then echo \"no rollout found\" >&2; exit 1; fi\nprintf '%s\\n' \"$@\" >> \"$FAKE_CODEX_LOG\"\nprintf '%s\\n' '---' >> \"$FAKE_CODEX_LOG\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&fake_codex, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // 偽の codex はこのテストの実行ファイル自身（main の先頭を見る）
+    let fake_codex = std::env::current_exe().unwrap();
 
     // alice がネットワークを持ち、bob は alice の招待で入る（install は飛ばす）
     let alice = make_home(&root, &fake_codex, &team_key, "alice", true);
@@ -276,8 +304,8 @@ fn before() -> Ctx {
 }
 
 fn after(ctx: Ctx) {
-    for (_, p) in ctx.daemons.lock().unwrap().drain() {
-        stop_daemon(p);
+    for (name, p) in ctx.daemons.lock().unwrap().drain() {
+        stop_daemon(p, if name == "alice" { &ctx.alice } else { &ctx.bob });
     }
     if std::env::var("NENWA_TEST_KEEP").is_err() {
         let _ = std::fs::remove_dir_all(&ctx.root);
@@ -528,7 +556,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     cli(&h, &["setup"]).unwrap(); // 2 回やっても重ならない
     let t = std::fs::read_to_string(codex.join("config.toml")).unwrap();
     assert_eq!(t.matches("[mcp_servers.nenwa]").count(), 1);
-    assert!(re(r#"command = ".*nenwa"\nargs = \["mcp","--agent","codex"\]"#).is_match(&t), "{t}");
+    assert!(re(r#"command = ".*nenwa(\.exe)?"\nargs = \["mcp","--agent","codex"\]"#).is_match(&t), "{t}");
     assert!(t.starts_with(toml));
     let ch = read(codex.join("hooks.json"))["hooks"].clone();
     let mut keys: Vec<&String> = ch.as_object().unwrap().keys().collect();
@@ -536,7 +564,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert_eq!(keys, ["PostToolUse", "SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]);
     assert_eq!(ch["PostToolUse"].as_array().unwrap().len(), 2);
     assert_eq!(ch["PostToolUse"][0], other_hook);
-    assert!(re(r"nenwa' hook codex stop$").is_match(ch["Stop"][0]["hooks"][0]["command"].as_str().unwrap()));
+    assert!(re(r#"nenwa(\.exe)?['"] hook codex stop$"#).is_match(ch["Stop"][0]["hooks"][0]["command"].as_str().unwrap()));
     let cm = read(cursor.join("mcp.json"))["mcpServers"].clone();
     assert_eq!(cm["nenwa"]["args"], json!(["mcp", "--agent", "cursor"]));
     let cu = read(cursor.join("hooks.json"));
@@ -553,7 +581,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
 }
 
 fn 相手がオフラインならoutboxに置き_戻ったら届く(c: &Ctx) {
-    stop_daemon(c.daemons.lock().unwrap().remove("bob").unwrap());
+    stop_daemon(c.daemons.lock().unwrap().remove("bob").unwrap(), &c.bob);
     until(|| who_has(&c.alice, "offline").then_some(()));
     let before = c.bob_session.len();
     let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "戻ったら読んで"]);
@@ -582,8 +610,12 @@ fn p2pオフ_install_が最初に作る形_でも_このパソコンの中では
 
         let inv = cli(&carol, &["invite"]).unwrap();
         assert!(
-            re(r"curl -fsSL https://github\.com/nogu66/nenwa/releases/latest/download/install\.sh \| bash -s -- join [A-Za-z0-9_-]{100,}")
-                .is_match(&inv),
+            re(if cfg!(windows) {
+                r"& \(\[scriptblock\]::Create\(\(irm https://github\.com/nogu66/nenwa/releases/latest/download/install\.ps1\)\)\) join [A-Za-z0-9_-]{88,}"
+            } else {
+                r"curl -fsSL https://github\.com/nogu66/nenwa/releases/latest/download/install\.sh \| bash -s -- join [A-Za-z0-9_-]{88,}"
+            })
+            .is_match(&inv),
             "{inv}"
         );
         let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&cfg_file).unwrap()).unwrap();
@@ -592,16 +624,29 @@ fn p2pオフ_install_が最初に作る形_でも_このパソコンの中では
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
     // 自動で起動したデーモンを止める
-    if let Ok(mut s) = UnixStream::connect(carol.home.join("sock")) {
-        let _ = s.write_all(b"{\"op\":\"shutdown\"}\n");
-        let _ = s.read_to_string(&mut String::new());
-    }
+    shutdown(&carol);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
 }
 
+// 偽の codex として呼ばれたとき: queue に渡された引数を記録する。codex-fail があれば失敗する。
+fn fake_codex(log: &str) {
+    if std::env::var("FAKE_CODEX_FAIL").is_ok_and(|f| Path::new(&f).exists()) {
+        eprintln!("no rollout found");
+        std::process::exit(1);
+    }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(log).unwrap();
+    for a in std::env::args().skip(1) {
+        writeln!(f, "{a}").unwrap();
+    }
+    writeln!(f, "---").unwrap();
+}
+
 fn main() {
+    if let Ok(log) = std::env::var("FAKE_CODEX_LOG") {
+        return fake_codex(&log);
+    }
     let tests: Vec<Test> = vec![
         ("相手のセッションが一覧に出る", 相手のセッションが一覧に出る),
         ("ターミナルから送ると相手のセッションに枠つきで届く", ターミナルから送ると相手のセッションに枠つきで届く),

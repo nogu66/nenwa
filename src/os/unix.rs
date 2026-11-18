@@ -52,10 +52,6 @@ pub fn host_name() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-pub fn uid() -> u32 {
-    unsafe { libc::getuid() }
-}
-
 // 権限 600 で書く（作るときだけ効く。Node の writeFileSync の mode と同じ）
 pub fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
@@ -98,4 +94,41 @@ pub async fn post_line(socket_path: &str, line: &str) -> std::io::Result<()> {
     let mut rest = Vec::new();
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), c.read_to_end(&mut rest)).await;
     Ok(())
+}
+
+// 手元の通信の場所があるか（unix ソケットはファイルとして残る）
+pub fn sock_exists(path: &Path) -> bool {
+    path.exists()
+}
+
+pub fn remove_sock(path: &Path) {
+    let _ = std::fs::remove_file(path);
+}
+
+// 動いている実行ファイルの場所
+pub fn exe_path() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.canonicalize().ok()
+}
+
+// shutdown を知らない古いデーモンは、ソケットを開いているプロセスに SIGTERM を送って止める。
+pub fn stop_socket_holders(sock: &Path) {
+    let Ok(out) = std::process::Command::new("lsof").arg("-t").arg(sock).output() else { return };
+    for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
+        if let Ok(pid) = pid.parse::<i32>() {
+            unsafe { libc::kill(pid, libc::SIGTERM) };
+        }
+    }
+}
+
+// デーモンを始める前の準備（Mac と Linux は何もしない。ログは自動起動の設定で daemon.log に向く）
+pub fn prepare_daemon(_log: &Path) {}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn 親プロセスの番号() {
+        assert_eq!(super::super::parent_pid(std::process::id() as i64), Some(super::own_parent_pid()));
+        assert!(super::alive(std::process::id() as i64));
+        assert_eq!(super::quote("a'b"), "'a'\\''b'");
+    }
 }

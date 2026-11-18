@@ -45,7 +45,7 @@ pub fn restart_daemon() {
     }
     if try_request(&json!({ "op": "shutdown" })).is_some() {
         for _ in 0..30 {
-            if !state::sock().exists() {
+            if !os::sock_exists(&state::sock()) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -83,15 +83,9 @@ pub fn install() -> Result<()> {
         println!("ネットワークを作りました（{}@{}、このパソコンの中だけ）", c.person, c.machine);
     }
     // 手で起動したデーモンが動いていれば止めて、自動起動に任せる。
-    // shutdown を知らない古いデーモンは、ソケットを開いているプロセスに SIGTERM を送って止める。
     let res = try_request(&json!({ "op": "shutdown" }));
-    if let Some(r) = &res
-        && r["ok"] != true
-        && let Ok(out) = Command::new("lsof").arg("-t").arg(state::sock()).output()
-    {
-        for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
-            quiet("kill", &["-TERM", pid]);
-        }
+    if res.as_ref().is_some_and(|r| r["ok"] != true) {
+        os::stop_socket_holders(&state::sock());
     }
     if res.is_some() {
         for _ in 0..30 {

@@ -19,7 +19,16 @@ use std::time::Duration;
 use message::clean;
 use state::{Config, ask, load_config, save_config, try_request};
 
-pub const INSTALL_LINE: &str = "curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh | bash";
+const DOWNLOAD: &str = "https://github.com/nogu66/nenwa/releases/latest/download";
+
+// 招待で入る 1 行。実行した人のパソコンと同じ OS の形で出す（Mac と Linux は bash、Windows は PowerShell）。
+fn join_line(code: &str) -> String {
+    if cfg!(windows) {
+        format!("& ([scriptblock]::Create((irm {DOWNLOAD}/install.ps1))) join {code}")
+    } else {
+        format!("curl -fsSL {DOWNLOAD}/install.sh | bash -s -- join {code}")
+    }
+}
 
 const USAGE: &str = "使い方（はじめては install.sh の 1 行で、導入から登録まで済む）:
   nenwa install                                  これだけで使える: 自動起動と、Claude Code・Codex・Cursor への登録
@@ -121,8 +130,8 @@ fn run() -> Result<()> {
                 .and_then(|k| k.try_into().ok())
                 .ok_or_else(|| anyhow::anyhow!("config.json の teamKey が正しくありません"))?;
             println!(
-                "自分の別のパソコンで、次の行を実行してください（合言葉が入っているので公開しない）:\n\n  {INSTALL_LINE} -s -- join {}",
-                net::encode_invite(&key, &addr)
+                "自分の別のパソコンで、次の行を実行してください（合言葉が入っているので公開しない）:\n\n  {}",
+                join_line(&net::encode_invite(&key, &addr))
             );
         }
         "join" => {

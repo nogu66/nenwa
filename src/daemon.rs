@@ -718,7 +718,7 @@ impl Daemon {
     }
 
     async fn stop(&self) {
-        let _ = std::fs::remove_file(state::sock());
+        os::remove_sock(&state::sock());
         if let Some(ep) = self.ep.get() {
             let _ = tokio::time::timeout(Duration::from_secs(3), ep.close()).await;
         }
@@ -735,17 +735,18 @@ fn key32(hex: &str, what: &str) -> Result<[u8; 32]> {
 }
 
 pub async fn start() -> Result<()> {
+    os::prepare_daemon(&state::log_file());
     let config = state::load_config().ok_or_else(|| anyhow!("config.json がありません。nenwa init か join を先に"))?;
     let (team_key, seed) = (key32(&config.team_key, "teamKey")?, key32(&config.seed, "seed")?);
     let sock = state::sock();
     let name = || sock.clone().into_os_string().to_fs_name::<GenericFilePath>();
 
     // 前のデーモンが残したソケットは、つながらなければ消す。
-    if sock.exists() {
+    if os::sock_exists(&sock) {
         if LocalStream::connect(name()?).await.is_ok() {
             return Err(AlreadyRunning.into());
         }
-        std::fs::remove_file(&sock)?;
+        os::remove_sock(&sock);
     }
 
     let mut mailboxes: Map<String, Value> = read_json(&state::mailboxes_file()).unwrap_or_default();

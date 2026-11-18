@@ -20,14 +20,24 @@ pub fn parent_pid(pid: i64) -> Option<i64> {
     stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
 
-pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::Result<String> {
-    let text = format!(
+// 落ちたときだけ起こし直す（2 つ目のデーモンは正常に終わるので、繰り返し起動されない）
+fn unit_text(exe: &Path, nenwa_home: &Path, log: &Path) -> String {
+    format!(
         "[Unit]\nDescription=nenwa daemon\n\n[Service]\nExecStart=\"{}\" daemon\nEnvironment=\"NENWA_HOME={}\"\nRestart=on-failure\nStandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
         exe.display(),
         nenwa_home.display(),
         log.display(),
         log.display()
-    );
+    )
+}
+
+// 書いてある状態フォルダが今のものと同じか（テストや別の NENWA_HOME で本物のデーモンを起こし直さない）
+fn same_home(unit: &str, nenwa_home: &Path) -> bool {
+    unit.lines().any(|l| l == format!("Environment=\"NENWA_HOME={}\"", nenwa_home.display()))
+}
+
+pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::Result<String> {
+    let text = unit_text(exe, nenwa_home, log);
     let file = unit_file();
     std::fs::create_dir_all(file.parent().unwrap())?;
     std::fs::write(&file, text)?;
@@ -45,9 +55,22 @@ pub fn autostart_remove() {
 }
 
 pub fn autostart_restart(nenwa_home: &Path) -> bool {
-    let want = format!("NENWA_HOME={}\"", nenwa_home.display());
     match std::fs::read_to_string(unit_file()) {
-        Ok(text) if text.contains(&want) => systemctl(&["restart", UNIT]),
+        Ok(text) if same_home(&text, nenwa_home) => systemctl(&["restart", UNIT]),
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn systemdのユニット() {
+        let t = unit_text(Path::new("/home/a/.local/bin/nenwa"), Path::new("/home/a/.nenwa"), Path::new("/home/a/.nenwa/daemon.log"));
+        assert!(t.contains("ExecStart=\"/home/a/.local/bin/nenwa\" daemon\n"));
+        assert!(t.contains("StandardError=append:/home/a/.nenwa/daemon.log\n"));
+        assert!(same_home(&t, Path::new("/home/a/.nenwa")));
+        assert!(!same_home(&t, Path::new("/home/a/.nenwa-test")));
     }
 }
