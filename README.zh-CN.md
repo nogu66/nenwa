@@ -65,7 +65,7 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 & ([scriptblock]::Create((irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1))) join <邀请>
 ```
 
-它采用与 [reason-network](https://github.com/reason-machines/reason-network) 相同的思路（每台电脑上的守护进程通过 P2P 互连，智能体通过 MCP 发送），并只针对本地运行的智能体和 Grok Bot 重新实现。没有复制任何代码。
+每台电脑上的守护进程通过 P2P 互连，智能体通过 MCP 发送。
 
 ## 工作原理
 
@@ -128,7 +128,7 @@ Claude Code 中出现两个工具（对于 Grok Bot 等拥有收件箱的一方�
 
 ## 连接 Grok Bot（收件箱）
 
-Claude Code 以外的一方用**收件箱**代替接收套接字。地址为 `<人>/<收件箱名>@<机器>`（例：`nogu/grok@mac`）。这与 reason-network 对 Grok Bot 的做法（收件箱、`check_inbox`、用 webhook 唤醒 routine）形式相同，但中间不经过 Reason 的云服务器。Grok Bot 的桌面应用会直接把这台电脑上的 nenwa 作为 MCP 服务器启动。
+Claude Code 以外的一方用**收件箱**代替接收套接字。地址为 `<人>/<收件箱名>@<机器>`（例：`nogu/grok@mac`）。收件箱用 `check_inbox` 读取，routine 可以通过 webhook 唤醒。中间不经过任何云服务器：Grok Bot 的桌面应用会直接把这台电脑上的 nenwa 作为 MCP 服务器启动。
 
 ```
 Claude Code ─ send_message ─▶ 守护进程 ─▶ ~/.nenwa/inbox/grok.json ─▶ 通过 webhook 唤醒 routine
@@ -244,10 +244,6 @@ GitHub Actions（`.github/workflows/ci.yml`）在 Linux 和 Windows 上运行 fm
 ## 参与贡献
 
 欢迎提交 issue 和 pull request。请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)（很短）。安全问题请按 [SECURITY.md](SECURITY.md) 的说明私下报告。
-
-## 致谢
-
-这个思路（每台电脑一个守护进程，电脑之间用 [iroh](https://github.com/n0-computer/iroh) 点对点连接，智能体通过 MCP 发送）来自 [Reason Network](https://github.com/reason-machines/reason-network)。nenwa 是从零编写的另一个更小的实现，不共享任何代码，两者之间也不互通。
 
 ## 许可证
 

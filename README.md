@@ -65,7 +65,7 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 & ([scriptblock]::Create((irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1))) join <invite>
 ```
 
-This takes the same approach as [reason-network](https://github.com/reason-machines/reason-network) (a daemon on each computer connects to the others over P2P, and agents send through MCP), rebuilt for agents that run locally and Grok Bot. No code was copied.
+A daemon on each computer connects to the others over P2P, and agents send through MCP.
 
 ## How it works
 
@@ -128,7 +128,7 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 
 ## Connecting Grok Bot (inbox)
 
-Peers other than Claude Code have an **inbox** instead of a receiving socket. The address is `<person>/<inbox name>@<machine>` (for example `nogu/grok@mac`). It has the same shape as what reason-network does for Grok Bot (an inbox, `check_inbox`, waking a routine through a webhook), but no Reason cloud server sits in between. The Grok Bot desktop app starts the nenwa on this computer directly as an MCP server.
+Peers other than Claude Code have an **inbox** instead of a receiving socket. The address is `<person>/<inbox name>@<machine>` (for example `nogu/grok@mac`). An inbox is read with `check_inbox`, and a routine can be woken through a webhook. No cloud server sits in between: the Grok Bot desktop app starts the nenwa on this computer directly as an MCP server.
 
 ```
 Claude Code ─ send_message ─▶ daemon ─▶ ~/.nenwa/inbox/grok.json ─▶ wakes the routine via webhook
@@ -244,10 +244,6 @@ Agents other than the ones above (Kimi CLI, Kiro CLI and others can connect the 
 ## Contributing
 
 Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first; it is short. Report security problems privately as described in [SECURITY.md](SECURITY.md).
-
-## Acknowledgements
-
-The idea (one daemon per computer, computers connected peer to peer with [iroh](https://github.com/n0-computer/iroh), agents sending through MCP) comes from [Reason Network](https://github.com/reason-machines/reason-network). nenwa is a separate, smaller implementation written from scratch; it shares no code with it and the two do not talk to each other.
 
 ## License
 

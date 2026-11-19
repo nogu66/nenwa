@@ -65,7 +65,7 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 & ([scriptblock]::Create((irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1))) join <招待>
 ```
 
-[reason-network](https://github.com/reason-machines/reason-network) と同じ考え方（パソコンごとのデーモンが P2P でつながり、エージェントは MCP で送る）を、手元で動くエージェントと Grok Bot に絞って作り直したもの。コードは写していない。
+パソコンごとのデーモンが P2P でつながり、エージェントは MCP で送る。
 
 ## 仕組み
 
@@ -128,7 +128,7 @@ Claude Code に出るツールは 2 つ（Grok Bot など受信箱を持つ相�
 
 ## Grok Bot とつなぐ（受信箱）
 
-Claude Code 以外の相手は、受信ソケットの代わりに **受信箱** を持つ。宛先は `<人>/<受信箱の名前>@<マシン>`（例: `nogu/grok@mac`）。reason-network が Grok Bot にしていること（受信箱、`check_inbox`、routine を webhook で起こす）と同じ形だが、Reason のクラウドのサーバーは挟まない。Grok Bot のデスクトップアプリが、このパソコンの nenwa を MCP サーバーとして直接起動する。
+Claude Code 以外の相手は、受信ソケットの代わりに **受信箱** を持つ。宛先は `<人>/<受信箱の名前>@<マシン>`（例: `nogu/grok@mac`）。受信箱は `check_inbox` で読み、routine は webhook で起こせる。クラウドのサーバーは挟まない。Grok Bot のデスクトップアプリが、このパソコンの nenwa を MCP サーバーとして直接起動する。
 
 ```
 Claude Code ─ send_message ─▶ デーモン ─▶ ~/.nenwa/inbox/grok.json ─▶ webhook で routine を起こす
@@ -244,10 +244,6 @@ GitHub Actions（`.github/workflows/ci.yml`）は、Linux と Windows で fmt、
 ## コントリビュート
 
 Issue と pull request を歓迎します。先に [CONTRIBUTING.md](CONTRIBUTING.md) を読んでください（短い文書です）。セキュリティの問題は、[SECURITY.md](SECURITY.md) のとおり非公開で報告してください。
-
-## 謝辞
-
-考え方（パソコンごとのデーモン、[iroh](https://github.com/n0-computer/iroh) による P2P 接続、エージェントは MCP で送る）は [Reason Network](https://github.com/reason-machines/reason-network) から来ている。nenwa は一から書いた別の小さな実装で、コードは共有しておらず、互いに通信もしない。
 
 ## ライセンス
 

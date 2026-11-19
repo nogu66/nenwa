@@ -432,13 +432,6 @@ agent (`NENWA_CODEX_DIR`, `NENWA_CURSOR_DIR`, `NENWA_GEMINI_DIR`, `NENWA_QWEN_DI
   resolution, setup and `--remove`, the outbox, and running with P2P off.
 - CI (`.github/workflows/ci.yml`) runs fmt, clippy and the tests on Linux and Windows. macOS is tested locally.
 
-## Prior art
-
-The concept comes from [reason-network](https://github.com/reason-machines/reason-network): a daemon on each
-machine, peers connected with iroh, agents sending through MCP, and an inbox with a webhook wake for Grok Bot. nenwa
-is an independent, smaller implementation. No code was copied, and the two do not talk to each other. nenwa starts
-as a single-machine tool with P2P off, and wires local agents through each agent's own config and hooks.
-
 ## Known limits
 
 - Claude Code delivery depends on `messagingSocketPath`, which is not a documented interface and may change.
