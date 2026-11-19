@@ -32,7 +32,7 @@ def arrow(x1, y1, x2, y2, color, dash=""):
     return f'<line x1="{x1}" y1="{y1}" x2="{x2}" y2="{y2}" stroke="{color}" stroke-width="2"{d} marker-end="url(#a{color[1:]})"/>'
 
 
-def svg(w, h, body, t, title):
+def svg(w, h, body, t, title, border=False):
     markers = "".join(
         f'<marker id="a{c[1:]}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="{c}"/></marker>'
         for c in (ORANGE, BLUE, GREEN, t["muted"])
@@ -40,7 +40,7 @@ def svg(w, h, body, t, title):
     return (
         f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" role="img" aria-label="{escape(title)}">'
         f"<title>{escape(title)}</title><defs>{markers}</defs>"
-        f'{rect(1, 1, w - 2, h - 2, t["bg"], t["line"], r=18)}{"".join(body)}</svg>\n'
+        f'{rect(1, 1, w - 2, h - 2, t["bg"], t["line"] if border else "none", r=24)}{"".join(body)}</svg>\n'
     )
 
 
@@ -66,37 +66,56 @@ def terminal(x, y, w, h, name, lines, t):
     return out
 
 
+def tile(cx, cy, size, fill, stroke, glyph, ink):
+    """An agent: a small rounded terminal tile with one glyph drawn in shapes (no font, so it looks the same everywhere)."""
+    x, y, u = cx - size / 2, cy - size / 2, size / 10
+    out = [rect(x, y, size, size, fill, stroke, r=round(size * 0.26), sw=2)]
+    if glyph in ("prompt", "chevron"):
+        out.append(f'<polyline points="{cx - 2.2 * u},{cy - 1.9 * u} {cx - 0.2 * u},{cy} {cx - 2.2 * u},{cy + 1.9 * u}" fill="none" stroke="{ink}" stroke-width="{u * 0.9:.1f}" stroke-linecap="round" stroke-linejoin="round"/>')
+        if glyph == "prompt":
+            out.append(f'<rect x="{cx + 0.7 * u}" y="{cy + 1.3 * u}" width="{2.4 * u}" height="{u * 0.9:.1f}" rx="{u * 0.45:.1f}" fill="{ink}"/>')
+    elif glyph == "dots":
+        out += [f'<circle cx="{cx + d * 2.1 * u}" cy="{cy}" r="{u * 0.75:.1f}" fill="{ink}"/>' for d in (-1, 0, 1)]
+    elif glyph == "lines":
+        out += [f'<rect x="{cx - 2.6 * u}" y="{cy + dy * u - u * 0.45}" width="{w * u}" height="{u * 0.9:.1f}" rx="{u * 0.45:.1f}" fill="{ink}"/>' for dy, w in ((-1.5, 5.2), (0.2, 3.6), (1.9, 4.4))]
+    return out
+
+
 def banner(t):
-    b = [
-        text(72, 150, "nenwa", 88, t["fg"], 700),
-        text(352, 150, "念話", 34, t["muted"], 500),
-        text(72, 204, "Your coding agents, talking to each other.", 28, t["fg"], 500),
-        text(72, 240, "One binary. Peer to peer. No server to run.", 18, t["muted"]),
+    W, H = 1600, 680
+    hub = (1190, 340)
+    others = [  # (cx, cy, size, fill, stroke, glyph, ink, color of the message on the way)
+        (955, 170, 100, t["card"], t["line"], "chevron", BLUE, BLUE),
+        (1430, 175, 104, ORANGE, "none", "dots", t["bg"], ORANGE),
+        (1470, 470, 92, BLUE, "none", "lines", t["bg"], BLUE),
+        (1290, 585, 76, t["card"], t["line"], "dots", GREEN, GREEN),
+        (985, 520, 84, GREEN, "none", "chevron", t["bg"], GREEN),
     ]
-    rows = [["Claude Code", "Codex", "Cursor"], ["OpenCode", "Pi", "Copilot CLI"], ["Gemini CLI", "Qwen Code", "Grok Bot"]]
-    colors = [ORANGE, BLUE, GREEN]
-    for r, names in enumerate(rows):
-        x = 1208 - sum(chip_w(n) for n in names) - 10 * (len(names) - 1)
-        for i, n in enumerate(names):
-            c, w = chip(x, 92 + r * 46, n, t, colors[(r + i) % 3])
-            b.append(c)
-            x += w + 10
-    y = 296
-    b += terminal(72, y, 470, 148, "Claude Code", [
-        ("> Ask Codex what GET /users returns.", None),
-        ("● send_message → nogu/api-7f2c@mac", t["term_muted"]),
-        ("● Codex says: Promise<User[]>", ORANGE),
-    ], t)
-    b += terminal(738, y, 470, 148, "Codex", [
-        ('<nenwa-message from="nogu/web-3a1b@mac">', t["term_muted"]),
-        ("What does GET /users return?", None),
-        ("● It returns Promise<User[]>.", BLUE),
-    ], t)
-    b.append(rect(580, y + 50, 120, 48, t["card"], t["line"], r=24))
-    b.append(text(640, y + 80, "nenwa", 17, t["fg"], 700, anchor="middle"))
-    b += [arrow(546, y + 60, 576, y + 60, ORANGE), arrow(704, y + 60, 734, y + 60, ORANGE)]
-    b += [arrow(734, y + 88, 704, y + 88, BLUE), arrow(576, y + 88, 546, y + 88, BLUE)]
-    return svg(1280, 500, b, t, "nenwa: your coding agents, talking to each other")
+    defs = (
+        f'<pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse"><circle cx="17" cy="17" r="1.6" fill="{t["line"]}"/></pattern>'
+        f'<radialGradient id="fade" cx="{hub[0]}" cy="{hub[1]}" r="560" gradientUnits="userSpaceOnUse"><stop offset="0.25" stop-color="#fff"/><stop offset="1" stop-color="#000"/></radialGradient>'
+        '<mask id="m"><rect width="100%" height="100%" fill="url(#fade)"/></mask>'
+    )
+    b = [f"<defs>{defs}</defs>", f'<rect x="700" y="0" width="{W - 700}" height="{H}" fill="url(#grid)" mask="url(#m)"/>']
+    # the waves of 念話, spreading from the agent in the middle
+    b += [f'<circle cx="{hub[0]}" cy="{hub[1]}" r="{r}" fill="none" stroke="{t["muted"]}" stroke-width="1.5" opacity="{o}"/>' for r, o in ((120, 0.42), (185, 0.3), (250, 0.2), (315, 0.12))]
+    for cx, cy, size, fill, stroke, glyph, ink, color in others:
+        mx, my = (hub[0] + cx) / 2 + (cy - hub[1]) * 0.16, (hub[1] + cy) / 2 - (cx - hub[0]) * 0.16  # bend each line a little
+        b.append(f'<path d="M{hub[0]} {hub[1]} Q{mx:.0f} {my:.0f} {cx} {cy}" fill="none" stroke="{t["muted"]}" stroke-width="2" opacity="0.55"/>')
+        b.append(f'<circle cx="{(hub[0] + 2 * mx + cx) / 4:.0f}" cy="{(hub[1] + 2 * my + cy) / 4:.0f}" r="7" fill="{color}" stroke="{t["bg"]}" stroke-width="3"/>')
+    for cx, cy, size, fill, stroke, glyph, ink, _ in others:
+        b += tile(cx, cy, size, fill, stroke, glyph, ink)
+    b += tile(hub[0], hub[1], 148, t["fg"], "none", "prompt", t["bg"])
+    # the words
+    b.append(f'<circle cx="122" cy="141" r="9" fill="{ORANGE}"/>')
+    b += [f'<path d="M{122 + r * 0.82:.1f} {141 - r * 0.57:.1f} A{r} {r} 0 0 1 {122 + r * 0.82:.1f} {141 + r * 0.57:.1f}" fill="none" stroke="{ORANGE}" stroke-width="3.5" stroke-linecap="round" opacity="{o}"/>' for r, o in ((19, 0.8), (30, 0.45))]
+    b.append(text(170, 152, "nenwa", 32, t["fg"], 700))
+    b.append(text(278, 152, "念話", 22, t["muted"], 500))
+    for i, line in enumerate(("Your coding agents,", "talking to each other.")):
+        b.append(f'<text x="110" y="{322 + i * 84}" font-family="{SANS}" font-size="70" font-weight="500" letter-spacing="-1.5" fill="{t["fg"]}">{escape(line)}</text>')
+    b.append(text(112, 484, "Claude Code, Codex, Cursor, OpenCode, Pi, Gemini CLI and more.", 22, t["muted"]))
+    b.append(text(112, 518, "One binary. Peer to peer. No server to run.", 22, t["muted"]))
+    return svg(W, H, b, t, "nenwa: your coding agents, talking to each other", border=False)
 
 
 def machine(x, name, agents, daemon_left, t):
