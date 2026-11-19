@@ -2,8 +2,13 @@
 name = "nenwa"
 version = "0.1.0"
 edition = "2024"
-description = "Let your local coding agents (Claude Code, Codex, Cursor) and Grok Bot message each other"
+description = "Let your own coding agents (Claude Code, Codex, Cursor, OpenCode, Pi and others) message each other"
 license = "MIT"
+repository = "https://github.com/nogu66/nenwa"
+homepage = "https://github.com/nogu66/nenwa"
+readme = "README.md"
+keywords = ["agents", "mcp", "claude-code", "codex", "p2p"]
+categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [dependencies]

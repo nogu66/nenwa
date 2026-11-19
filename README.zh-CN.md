@@ -2,6 +2,10 @@
 
 [English](README.md) | [日本語](README.ja.md) | 简体中文
 
+[![ci](https://github.com/nogu66/nenwa/actions/workflows/ci.yml/badge.svg)](https://github.com/nogu66/nenwa/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/nogu66/nenwa)](https://github.com/nogu66/nenwa/releases/latest)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 一个小工具，让你自己的智能体（Claude Code、Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code、Grok Bot）之间可以互相发消息。比如你对 Claude Code 说"去问问 Codex 这个 API 的返回类型"，问题就会送到 Codex 的对话里，回答再回到 Claude Code。它只是一个可执行文件（不需要 Node.js），可在 macOS、Linux 和 Windows 上运行。
 
 名字来自"念话"（nenwa）：与远方的同伴用心灵对话，是动漫里常见的能力。
@@ -80,6 +84,8 @@ Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC, TLS 加密)
 - **重发**：对方电脑离线时，消息存放在 `~/.nenwa/outbox.json`，连上后再发送。接收方返回 ack，同一个 id 不会投递两次。
 - **防失控**：每个发送者每分钟最多 20 条。没有人工输入时，智能体之间最多连续回复 10 次（沿 `reply_to` 追溯计数）。
 - **地址名称**：`<人>/<文件夹名>-<会话 ID 前 4 位>@<机器>`（例：`alice/api-3f2a@alice-mbp`）。执行 `/clear` 后 ID 会变，名称也会随之改变。从终端发送时为 `<人>/terminal@<机器>`。
+
+完整的设计（信任模型、各个智能体的接入方式）见 [DESIGN.md](DESIGN.md)（英文）。
 
 ## 工具
 
@@ -217,6 +223,10 @@ cargo test
 
 GitHub Actions（`.github/workflows/ci.yml`）在 Linux 和 Windows 上运行 fmt、clippy 和测试，构建发布用的可执行文件（两种 Linux musl 版本和 Windows 版本）并保存为构件。macOS 在本地运行。
 
+## 发布
+
+在 `Cargo.toml` 中设定版本号，然后推送同号的标签（`git tag v0.1.0 && git push origin v0.1.0`）。`.github/workflows/release.yml` 会为 macOS（Apple 芯片和 Intel）、Linux（x86_64 和 arm64，musl）以及 Windows（x86_64）构建，并发布 GitHub Release，其中包含压缩包、一个 `SHA256SUMS` 和两个安装脚本。上面的一行安装命令从最新的发布下载。
+
 ## 舍弃的功能
 
 上面列出的以外的智能体（Kimi CLI、Kiro CLI 等也可以用 `mcp --as <名称>` 的收件箱以同样方式连接；只有在它们自己调用 check_inbox 时才会收到消息）、带签名的成员名单、账户登录、文件附件、审批弹窗（`ask_user`）、菜单栏显示、自建 relay。
@@ -230,3 +240,15 @@ GitHub Actions（`.github/workflows/ci.yml`）在 Linux 和 Windows 上运行 fm
 - Windows 的自动启动仅在 `NENWA_HOME` 位于默认位置（`%USERPROFILE%\.nenwa`）时可用（任务计划程序无法传递环境变量）。
 - 没有移除成员的机制。要移除时，重新生成团队密钥（`init`），只给留下的人重新发送邀请。
 - 对方会话关闭时无法送达（`no_session`）。发往离线电脑的消息会被保存，但发往已关闭会话的消息不会保存。
+
+## 参与贡献
+
+欢迎提交 issue 和 pull request。请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)（很短）。安全问题请按 [SECURITY.md](SECURITY.md) 的说明私下报告。
+
+## 致谢
+
+这个思路（每台电脑一个守护进程，电脑之间用 [iroh](https://github.com/n0-computer/iroh) 点对点连接，智能体通过 MCP 发送）来自 [Reason Network](https://github.com/reason-machines/reason-network)。nenwa 是从零编写的另一个更小的实现，不共享任何代码，两者之间也不互通。
+
+## 许可证
+
+[MIT](LICENSE)

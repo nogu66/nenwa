@@ -1,4 +1,4 @@
-# Linux と Windows で fmt、clippy、テストを流し、配る実行ファイルを作る（Release は作らない。成果物として残すだけ）。
+# Linux と Windows で fmt、clippy、テストを流し、配る実行ファイルを作って install スクリプトを試す（Release は release.yml が作る）。
 # Mac は Actions だと 10 倍に数えられるので、手元で確かめる。
 name: ci
 
@@ -7,6 +7,9 @@ on:
     branches: [main, rust]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,9 +24,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install stable --profile minimal -c rustfmt,clippy && rustup default stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
@@ -48,11 +51,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: ${{ matrix.target }}
       - run: cargo build --release --locked --target ${{ matrix.target }}
@@ -105,7 +108,7 @@ jobs:
           if (-not $LASTEXITCODE) { throw 'scheduled task still there after uninstall' }
           $global:LASTEXITCODE = 0
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nenwa-${{ matrix.target }}
           path: dist/*

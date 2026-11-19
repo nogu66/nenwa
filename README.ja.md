@@ -2,6 +2,10 @@
 
 [English](README.md) | 日本語 | [简体中文](README.zh-CN.md)
 
+[![ci](https://github.com/nogu66/nenwa/actions/workflows/ci.yml/badge.svg)](https://github.com/nogu66/nenwa/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/nogu66/nenwa)](https://github.com/nogu66/nenwa/releases/latest)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 自分のエージェント同士（Claude Code、Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code、Grok Bot）がメッセージを送り合えるようにする小さなツール。たとえば Claude Code に「Codex にこの API の型を聞いて」と頼むと、Codex の会話に届き、返事が Claude Code に戻ってくる。1 つの実行ファイルで動く（Node.js は要らない）。Mac、Linux、Windows で動く。
 
 名前は「念話」（離れた仲間と心で話す、アニメでおなじみの力）から。
@@ -80,6 +84,8 @@ Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC、TLS で暗号
 - **再送**: 相手のパソコンがオフラインなら `~/.nenwa/outbox.json` に置き、つながったときに送る。受け取った側は ack を返し、同じ id は二度届けない。
 - **暴走よけ**: 1 人の送り主から 1 分に 20 通まで。人の入力なしにエージェント同士が返事を続けられるのは 10 回まで（`reply_to` でたどって数える）。
 - **宛先の名前**: `<人>/<フォルダ名>-<セッション ID の先頭 4 文字>@<マシン>`（例: `alice/api-3f2a@alice-mbp`）。`/clear` すると ID が変わるので名前も変わる。ターミナルから送ると `<人>/terminal@<マシン>` になる。
+
+設計の全体（信頼の考え方、エージェントごとのつなぎ方）は [DESIGN.md](DESIGN.md)（英語）にある。
 
 ## ツール
 
@@ -217,6 +223,10 @@ cargo test
 
 GitHub Actions（`.github/workflows/ci.yml`）は、Linux と Windows で fmt、clippy、テストを流し、配る実行ファイル（Linux の musl 2 種類と Windows）を作って成果物に残す。Mac は手元で流す。
 
+## リリース
+
+`Cargo.toml` のバージョンを決め、同じ番号のタグを push する（`git tag v0.1.0 && git push origin v0.1.0`）。`.github/workflows/release.yml` が macOS（Apple シリコンと Intel）、Linux（x86_64 と arm64、musl）、Windows（x86_64）向けにビルドし、圧縮ファイル、1 つの `SHA256SUMS`、2 つのインストールスクリプトを載せた GitHub Release を公開する。上のインストール用の 1 行は、最新のリリースから落とす。
+
 ## 削ったもの
 
 上に挙げた以外のエージェント（Kimi CLI や Kiro CLI なども、`mcp --as <名前>` の受信箱なら同じ形でつなげる。届くのは自分で check_inbox したとき）、署名つきの名簿、アカウントでのサインイン、ファイル添付、承認のポップアップ（`ask_user`）、メニューバー表示、自前のリレー。
@@ -230,3 +240,15 @@ GitHub Actions（`.github/workflows/ci.yml`）は、Linux と Windows で fmt、
 - Windows の自動起動は、`NENWA_HOME` がふつうの場所（`%USERPROFILE%\.nenwa`）のときだけ使える（タスク スケジューラは環境変数を渡せない）。
 - メンバーを外す仕組みはない。外すときはチーム鍵を作り直して（`init`）、残る人だけに招待を配り直す。
 - 相手のセッションが閉じていると届かない（`no_session`）。オフラインのパソコン宛ては貯めるが、閉じたセッション宛ては貯めない。
+
+## コントリビュート
+
+Issue と pull request を歓迎します。先に [CONTRIBUTING.md](CONTRIBUTING.md) を読んでください（短い文書です）。セキュリティの問題は、[SECURITY.md](SECURITY.md) のとおり非公開で報告してください。
+
+## 謝辞
+
+考え方（パソコンごとのデーモン、[iroh](https://github.com/n0-computer/iroh) による P2P 接続、エージェントは MCP で送る）は [Reason Network](https://github.com/reason-machines/reason-network) から来ている。nenwa は一から書いた別の小さな実装で、コードは共有しておらず、互いに通信もしない。
+
+## ライセンス
+
+[MIT](LICENSE)

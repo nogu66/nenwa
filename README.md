@@ -2,6 +2,10 @@
 
 English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 
+[![ci](https://github.com/nogu66/nenwa/actions/workflows/ci.yml/badge.svg)](https://github.com/nogu66/nenwa/actions/workflows/ci.yml)
+[![release](https://img.shields.io/github/v/release/nogu66/nenwa)](https://github.com/nogu66/nenwa/releases/latest)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A small tool that lets your own agents (Claude Code, Codex, Cursor, OpenCode, Pi, Copilot CLI, Gemini CLI, Antigravity CLI, Qwen Code, Grok Bot) send messages to each other. For example, ask Claude Code to "ask Codex for the type this API returns", and the question lands in the Codex conversation and the answer comes back to Claude Code. It is a single executable (no Node.js needed) and runs on macOS, Linux and Windows.
 
 The name comes from 念話 ("nenwa"): telepathic speech between distant allies, a common power in anime.
@@ -80,6 +84,8 @@ you: nenwa send/who ─────┼──────────▶ nenwa da
 - **Retries**: if the peer computer is offline, the message is kept in `~/.nenwa/outbox.json` and sent when it connects. The receiver returns an ack, and the same id is never delivered twice.
 - **Runaway guard**: up to 20 messages per minute from one sender. Agents can keep replying to each other without human input up to 10 times (counted by following `reply_to`).
 - **Address names**: `<person>/<folder name>-<first 4 chars of the session ID>@<machine>` (for example `alice/api-3f2a@alice-mbp`). `/clear` changes the ID, so the name changes too. Messages sent from the terminal come from `<person>/terminal@<machine>`.
+
+The full design, including the trust model and how each agent is wired, is in [DESIGN.md](DESIGN.md).
 
 ## Tools
 
@@ -215,7 +221,11 @@ This runs the small tests inside `src/` (HMAC, escaping the frame, address forma
 
 They start daemons for two people (with `NENWA_RELAY=disabled`, no relay or DNS is used and they connect through the LAN addresses in the invite), fake Claude Code sessions (named pipes on Windows), a fake webhook and a fake codex, and check: the list, delivery, unknown addresses, inboxes (waking by webhook, not waking again, reading while waiting, replying under the inbox name, replies to terminal, which MCP tools are shown), the Cursor and Codex hooks (address, injection, continuing at stop, codex queue and its failure, the MCP sender, no daemon), setup and --remove, retries while offline, and delivery and invite with P2P off. They take about 10 seconds. To look at the logs, keep the temporary folder with `NENWA_TEST_KEEP=1 cargo test`.
 
-GitHub Actions (`.github/workflows/ci.yml`) runs fmt, clippy and the tests on Linux and Windows, builds the release executables (two Linux musl builds and Windows) and keeps them as artifacts. macOS is tested locally.
+GitHub Actions (`.github/workflows/ci.yml`) runs fmt, clippy and the tests on Linux and Windows, builds the executables (two Linux musl builds and Windows) and tries the install scripts against them. macOS is tested locally.
+
+## Releases
+
+Set the version in `Cargo.toml`, then push a tag with the same number (`git tag v0.1.0 && git push origin v0.1.0`). `.github/workflows/release.yml` builds for macOS (Apple silicon and Intel), Linux (x86_64 and arm64, musl) and Windows (x86_64), and publishes a GitHub Release with the archives, one `SHA256SUMS` and the two install scripts. The install one-liners above download from the latest release.
 
 ## Left out
 
@@ -230,3 +240,15 @@ Agents other than the ones above (Kimi CLI, Kiro CLI and others can connect the 
 - Autostart on Windows works only when `NENWA_HOME` is in the default location (`%USERPROFILE%\.nenwa`), because Task Scheduler cannot pass environment variables.
 - There is no way to remove a member. To remove one, recreate the team key (`init`) and send new invites only to the people who stay.
 - Messages to a closed session are not delivered (`no_session`). Messages to an offline computer are kept, but messages to a closed session are not.
+
+## Contributing
+
+Issues and pull requests are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first; it is short. Report security problems privately as described in [SECURITY.md](SECURITY.md).
+
+## Acknowledgements
+
+The idea (one daemon per computer, computers connected peer to peer with [iroh](https://github.com/n0-computer/iroh), agents sending through MCP) comes from [Reason Network](https://github.com/reason-machines/reason-network). nenwa is a separate, smaller implementation written from scratch; it shares no code with it and the two do not talk to each other.
+
+## License
+
+[MIT](LICENSE)

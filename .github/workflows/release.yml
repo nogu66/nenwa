@@ -1,0 +1,95 @@
+# Tagging vX.Y.Z builds nenwa for every platform and publishes a GitHub Release with the archives, one SHA256SUMS file
+# and the install scripts. scripts/install.sh and scripts/install.ps1 download from releases/latest/download, so the
+# asset names here are part of the install contract.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and publish (for example v0.1.0)
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: aarch64-apple-darwin, os: macos-15 }
+          - { target: x86_64-apple-darwin, os: macos-15 }
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04 }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      - name: the tag matches the version in Cargo.toml
+        shell: bash
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          [ "v$version" = "$TAG" ] || { echo "tag $TAG does not match Cargo.toml version $version" >&2; exit 1; }
+      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: package
+        if: runner.os != 'Windows'
+        run: |
+          mkdir dist
+          tar -czf dist/nenwa-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release nenwa
+          cd dist && shasum -a 256 nenwa-${{ matrix.target }}.tar.gz > nenwa-${{ matrix.target }}.sha256
+      - name: package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          $name = "nenwa-${{ matrix.target }}.zip"
+          Compress-Archive -Path target/${{ matrix.target }}/release/nenwa.exe -DestinationPath dist/$name
+          $hash = (Get-FileHash dist/$name -Algorithm SHA256).Hash.ToLower()
+          Set-Content -NoNewline -Encoding ascii "dist/nenwa-${{ matrix.target }}.sha256" "$hash  $name`n"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: nenwa-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: one SHA256SUMS for every archive, checked
+        run: |
+          cd dist
+          cat nenwa-*.sha256 > SHA256SUMS && rm nenwa-*.sha256
+          sha256sum --check SHA256SUMS
+          [ "$(wc -l < SHA256SUMS)" -eq 5 ]
+          cp ../scripts/install.sh ../scripts/install.ps1 .
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
