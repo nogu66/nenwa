@@ -72,8 +72,6 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 & ([scriptblock]::Create((irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1))) join <招待>
 ```
 
-パソコンごとのデーモンが P2P でつながり、エージェントは MCP で送る。
-
 ## 仕組み
 
 <p align="center">
@@ -83,21 +81,10 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
   </picture>
 </p>
 
-```
-Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC、TLS で暗号化)
-あなた: nenwa send/who ──┼──────────▶ nenwa daemon ⇄ 相手の nenwa daemon ─▶ 相手の Claude Code
-                           ┘ ~/.nenwa/sock
-```
-
-- **つながり方**: [iroh](https://github.com/n0-computer/iroh)。パソコンの公開鍵を宛先にして、n0 の DNS と relay で相手を探し、できればホールパンチで直接つなぐ。直接つなげなければ relay を通す（中身は暗号化されたまま）。
-- **招待と仲間の一覧**: 招待の文字列は、チーム鍵と 1 台目の住所（公開鍵、relay、LAN の住所）を base64url にしたもの。つながると、互いの知っている仲間の住所を交換して、知らない仲間にもつなぐ。仲間は `~/.nenwa/peers.json` に残し、起動のたびにつなぎ直す。
-- **本人確認**: つながった直後に `HMAC(チーム鍵, 自分の公開鍵 + 相手の公開鍵)` を送り合い、合わなければ切る。
-- **送り主の確認**: パソコンは自分の人の名前でしか送れない（hello で名乗った人とマシン以外の `from` は拒否する）。
-- **配送**: Claude Code は開いているセッションごとに `~/.claude/sessions/<pid>.json` に受信ソケット（`messagingSocketPath`）を書いている。受け取ったデーモンはそこに `{"type":"user",...}` を 1 行書く。作業中ならツール呼び出しの合間に届き、待機中ならそこでターンが始まる。
-- **枠**: 届く本文は `<nenwa-message from="..." id="...">` で囲み、ユーザーの指示ではないと書き添える。本文の中の閉じタグは無効にする。
-- **再送**: 相手のパソコンがオフラインなら `~/.nenwa/outbox.json` に置き、つながったときに送る。受け取った側は ack を返し、同じ id は二度届けない。
-- **暴走よけ**: 1 人の送り主から 1 分に 20 通まで。人の入力なしにエージェント同士が返事を続けられるのは 10 回まで（`reply_to` でたどって数える）。
-- **宛先の名前**: `<人>/<フォルダ名>-<セッション ID の先頭 4 文字>@<マシン>`（例: `alice/api-3f2a@alice-mbp`）。`/clear` すると ID が変わるので名前も変わる。ターミナルから送ると `<人>/terminal@<マシン>` になる。
+- **接続**: パソコン同士は [iroh](https://github.com/n0-computer/iroh)（QUIC、暗号化）で P2P につながる。直接つながるときは直接、無理なときは中継を通る。どちらでも中身は暗号化されたまま。
+- **入れる相手**: 招待で受け取ったチームの鍵を持つパソコンだけ。パソコンは自分の名前でしか送れない。
+- **届け方**: デーモンが、開いている会話にメッセージを入れる。本文は `<nenwa-message from="..." id="...">` で包み、ユーザーの指示ではないと書き添える。相手のパソコンが落ちているときは取っておき、つながったときに送る。
+- **暴走の歯止め**: 同じ送り主からは 1 分に 20 通まで。人の入力なしにエージェント同士が返事を続けられるのは 10 回まで。
 
 設計の全体（信頼の考え方、エージェントごとのつなぎ方）は [DESIGN.md](DESIGN.md)（英語）にある。
 
@@ -128,7 +115,7 @@ Claude Code に出るツールは 2 つ（Grok Bot など受信箱を持つ相�
 |---|---|---|---|
 | Codex | `SessionStart` フック | `codex queue --thread <ID>` で会話に入れる（そこで動き出す） | 同じ。失敗したら受信箱に置き、`PostToolUse` で差し込むか `Stop` で続けさせる |
 | Cursor | `sessionStart` フック | 受信箱で待つ（次に動いたときに届く） | `postToolUse` で差し込み、`stop` の `followup_message` で続けさせる |
-| OpenCode | プラグイン（会話ができたとき、入力したとき） | OpenCode の手元のサーバー（`POST /session/<ID>/prompt_async`）に送って会話に入れる（そこで動き出す） | 同じ。届かなければ受信箱に置き、ツール実行後の結果に足すか、応答が終わったときに続けさせる |
+| OpenCode | プラグイン（会話ができたとき、または入力したとき） | プラグインが届くのを待っていて、届いたら会話に入れる（そこで動き出す）。`opencode serve` のときは、デーモンが手元のサーバーに直接送る | 同じ。だめなときは、ツールの結果に足すか、会話が待機に入るときに続けさせる |
 | Pi | 拡張（会話が始まったとき） | 拡張が届くのを待っていて、届いたら会話に入れる（そこで動き出す）。送った側には `inbox` と返る | 同じ（今の手順のあとに入る） |
 | Copilot CLI | `sessionStart` フック | 受信箱で待つ（次に動いたときに届く） | `postToolUse` で差し込み、`agentStop` の `decision: "block"` で続けさせる |
 | Antigravity CLI | `SessionStart` フック | 受信箱で待つ（次に動いたときに届く） | `PreInvocation`（モデルを呼ぶ前）に `injectSteps` で差し込み、`Stop` の `decision: "continue"` で続けさせる |
@@ -136,15 +123,11 @@ Claude Code に出るツールは 2 つ（Grok Bot など受信箱を持つ相�
 | Qwen Code | `SessionStart` フック | 受信箱で待つ（次に動いたときに届く） | `UserPromptSubmit` と `PostToolUse` で差し込み、`Stop` の `decision: "block"` で続けさせる |
 
 - 宛先は `<人>/<フォルダ名>-<会話 ID の末尾 4 文字>@<マシン>`。セッションが始まったときに、その宛先が会話に知らされる。
-- フックと MCP サーバー（`mcp --agent <名前>`）は、自分を起動した親プロセスをデーモンに伝える。デーモンは 2 回のフックに共通する親を、そのエージェントの本体として覚える。MCP から送るときの送り主は、同じ本体から起動された会話に決まる。本体がまだ分からないうちは「作業中、フォルダが合う、最近動いた」会話を選ぶ。
 - 本体のプロセスが消えた会話は、一覧から外れる（そこへ送ると `no_session`）。
-- OpenCode は 1.1.8 の `opencode serve` で、登録、待機中の会話への配送、プロセスが消えたあとの `no_session` を確かめた。始まったときに宛先を会話に知らせることはしない（知らせると、それだけで応答が始まるため）。サーバーの住所は自分のパソコンの中（127.0.0.1）だけを受け付ける。
-- Pi は 0.82.1 の RPC モードで、拡張の読み込み、登録、待機中の会話が動き出すこと、ツールの送り主がその会話になることを確かめた。
-- Gemini CLI、Antigravity CLI、Qwen Code、Copilot CLI は公式ドキュメントの仕様どおりに作ってあり、偽の入力でのテストだけ済んでいる。本物での確認はまだ。`settings.json` がコメント入りなどで読めないときは、書き換えずにそのままにする。
+- 本物で確かめたもの: Claude Code、Codex、Cursor、OpenCode（1.19.6）、Pi（0.82.1）、Grok Bot。Gemini CLI、Antigravity CLI、Qwen Code、Copilot CLI は公式ドキュメントどおりに作り、偽の入力でだけテストしている。設定ファイルが読めないとき（コメント入りなど）は、そのままにする。
 - Codex はフックを信頼するまで動かさない。`install` のあとに開いたセッションで `/hooks` を開いて、nenwa のフックを信頼する。
 - Codex は、nenwa のツールを呼ぶたびに承認を求める（`codex exec` のような自動実行では呼べない）。承認なしにするかどうかは自分で決める。する場合は `~/.codex/config.toml` の `[mcp_servers.nenwa]` に `default_tools_approval_mode = "approve"` を足す。Codex が確認なしにほかのエージェントへ送れるようになる。`nenwa install` をやり直すと、この行は消える。
 - うまく届かないときは `nenwa doctor`。エージェントごとに、入っているか、nenwa が登録済みか、会話が見えているかを出す。
-- Cursor の `beforeSubmitPrompt` は会話に文章を足せないので、そこでは取り出さない。
 - フックはデーモンが動いていなければ何も出さずに終わる（エージェントの動きを止めない）。
 
 ## Grok Bot とつなぐ（受信箱）
@@ -240,17 +223,11 @@ cargo test
 
 `src/` の中の小さなテスト（HMAC、枠の抜け出し、宛先の形、招待の文字列など）と、`tests/e2e.rs` の通しのテストが動く。通しのテストは、ビルドした実行ファイルを一時フォルダの `NENWA_HOME` と `HOME`（Windows は `USERPROFILE`）で動かすので、本物の `~/.nenwa` や `~/.claude` には触らない。
 
-2 人分のデーモン（`NENWA_RELAY=disabled` で relay も DNS も使わず、招待の LAN の住所でつなぐ）と偽の Claude Code セッション（Windows は名前付きパイプ）、偽の webhook と偽の codex を立て、一覧・配送・いない宛先・受信箱（webhook で起こす、起こし直さない、待ちながら読む、受信箱の名前で返事、terminal への返事、MCP のツールの出し分け）・Cursor と Codex のフック（宛先、差し込み、stop での続き、codex queue とその失敗、MCP の送り主、デーモンがないとき）・setup と --remove・オフライン時の再送・P2P オフでの配送と invite を確かめる。10 秒ほどで終わる。ログを見たいときは `NENWA_TEST_KEEP=1 cargo test` で一時フォルダを残す。
-
 GitHub Actions（`.github/workflows/ci.yml`）は、Linux と Windows で fmt、clippy、テストを流し、配る実行ファイル（Linux の musl 2 種類と Windows）を作って成果物に残す。Mac は手元で流す。
 
 ## リリース
 
 `Cargo.toml` のバージョンを決め、同じ番号のタグを push する（`git tag v0.1.0 && git push origin v0.1.0`）。`.github/workflows/release.yml` が macOS（Apple シリコンと Intel）、Linux（x86_64 と arm64、musl）、Windows（x86_64）向けにビルドし、圧縮ファイル、1 つの `SHA256SUMS`、2 つのインストールスクリプトを載せた GitHub Release を公開する。上のインストール用の 1 行は、最新のリリースから落とす。
-
-## 削ったもの
-
-上に挙げた以外のエージェント（Kimi CLI や Kiro CLI なども、`mcp --as <名前>` の受信箱なら同じ形でつなげる。届くのは自分で check_inbox したとき）、署名つきの名簿、アカウントでのサインイン、ファイル添付、承認のポップアップ（`ask_user`）、メニューバー表示、自前のリレー。
 
 ## 気をつけること
 

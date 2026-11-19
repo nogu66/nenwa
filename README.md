@@ -72,8 +72,6 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 & ([scriptblock]::Create((irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1))) join <invite>
 ```
 
-A daemon on each computer connects to the others over P2P, and agents send through MCP.
-
 ## How it works
 
 <p align="center">
@@ -83,21 +81,10 @@ A daemon on each computer connects to the others over P2P, and agents send throu
   </picture>
 </p>
 
-```
-Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC, TLS-encrypted)
-you: nenwa send/who ─────┼──────────▶ nenwa daemon ⇄ peer's nenwa daemon ─▶ peer's Claude Code
-                         ┘ ~/.nenwa/sock
-```
-
-- **Connections**: [iroh](https://github.com/n0-computer/iroh). Each computer is addressed by its public key. Peers are found through n0's DNS and relays, and connected directly by hole punching when possible. If a direct connection is not possible, traffic goes through a relay (the content stays encrypted).
-- **Invites and the peer list**: an invite string is the team key plus the first computer's address (public key, relay, LAN addresses), encoded as base64url. Once connected, peers exchange the addresses of the peers they know and connect to the ones they did not know. Peers are kept in `~/.nenwa/peers.json` and reconnected on every start.
-- **Authentication**: right after connecting, both sides send `HMAC(team key, own public key + peer's public key)` and disconnect if it does not match.
-- **Sender check**: a computer can only send under its own person's name (a `from` other than the person and machine announced in hello is rejected).
-- **Delivery**: for each open session, Claude Code writes a receiving socket (`messagingSocketPath`) to `~/.claude/sessions/<pid>.json`. The receiving daemon writes one `{"type":"user",...}` line to it. If the session is working, the message arrives between tool calls; if it is idle, a turn starts there.
-- **Framing**: incoming text is wrapped in `<nenwa-message from="..." id="...">` with a note that it is not an instruction from the user. Closing tags inside the text are neutralized.
-- **Retries**: if the peer computer is offline, the message is kept in `~/.nenwa/outbox.json` and sent when it connects. The receiver returns an ack, and the same id is never delivered twice.
-- **Runaway guard**: up to 20 messages per minute from one sender. Agents can keep replying to each other without human input up to 10 times (counted by following `reply_to`).
-- **Address names**: `<person>/<folder name>-<first 4 chars of the session ID>@<machine>` (for example `alice/api-3f2a@alice-mbp`). `/clear` changes the ID, so the name changes too. Messages sent from the terminal come from `<person>/terminal@<machine>`.
+- **Connections**: computers connect peer to peer with [iroh](https://github.com/n0-computer/iroh) (QUIC, encrypted). They connect directly when possible and through a relay otherwise; the content stays encrypted either way.
+- **Who can join**: only computers that hold your team key, which they get from an invite. A computer can only send under its own name.
+- **Delivery**: the daemon puts the message into the open conversation, wrapped in `<nenwa-message from="..." id="...">` with a note that it is not an instruction from the user. If the other computer is offline, the message is kept and sent when it reconnects.
+- **Runaway guard**: up to 20 messages per minute from one sender, and agents can reply to each other at most 10 times in a row without human input.
 
 The full design, including the trust model and how each agent is wired, is in [DESIGN.md](DESIGN.md).
 
@@ -128,7 +115,7 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 |---|---|---|---|
 | Codex | `SessionStart` hook | Put into the conversation with `codex queue --thread <ID>` (it starts working there) | Same. If that fails, it goes to the inbox and is injected at `PostToolUse` or continued at `Stop` |
 | Cursor | `sessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `postToolUse`, and continued with `followup_message` at `stop` |
-| OpenCode | The plugin (when a conversation is created, or on your input) | Sent to OpenCode's local server (`POST /session/<ID>/prompt_async`), which puts it into the conversation (it starts working there) | Same. If that fails, it goes to the inbox and is appended to the next tool result, or continued when the reply ends |
+| OpenCode | The plugin (when a conversation is created, or on your input) | The plugin is waiting for messages and puts one into the conversation as it arrives (it starts working there). With `opencode serve`, the daemon posts it to the local server directly | Same. Otherwise it is appended to a tool result or continued when the conversation goes idle |
 | Pi | The extension (when a conversation starts) | The extension is waiting for messages and puts one into the conversation as it arrives (it starts working there). The sender sees `inbox` | Same (it goes in after the current step) |
 | Copilot CLI | `sessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `postToolUse`, and continued with `decision: "block"` at `agentStop` |
 | Antigravity CLI | `SessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected with `injectSteps` at `PreInvocation` (before each model call), and continued with `decision: "continue"` at `Stop` |
@@ -136,15 +123,11 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 | Qwen Code | `SessionStart` hook | Waits in the inbox (delivered the next time it runs) | Injected at `UserPromptSubmit` and `PostToolUse`, and continued with `decision: "block"` at `Stop` |
 
 - The address is `<person>/<folder name>-<last 4 chars of the conversation ID>@<machine>`. When a session starts, the conversation is told its address.
-- The hooks and the MCP server (`mcp --agent <name>`) tell the daemon which processes started them. The daemon remembers the parent shared by two hook calls as the agent itself. A message sent through MCP gets, as its sender, the conversation started by the same agent process. Until that process is known, the daemon picks a conversation that is working, in the matching folder, and recently active.
 - A conversation whose agent process is gone leaves the list (sending to it gives `no_session`).
-- OpenCode was checked with `opencode serve` 1.1.8: registration, delivery into an idle conversation, and `no_session` after the process is gone. The conversation is not told its address when it starts (doing so would start a reply by itself). Only a server address on this computer (127.0.0.1) is accepted.
-- Pi was checked with 0.82.1 in RPC mode: the extension loads, the conversation is listed, a message starts an idle conversation, and the sender of a tool call is that conversation.
-- Gemini CLI, Antigravity CLI, Qwen Code and Copilot CLI support follows their official docs and is tested with fake input only; it has not been checked against the real tools yet. If `settings.json` cannot be parsed (comments, for example), it is left as it is.
+- Checked against the real tools: Claude Code, Codex, Cursor, OpenCode (1.19.6), Pi (0.82.1) and Grok Bot. Gemini CLI, Antigravity CLI, Qwen Code and Copilot CLI follow their official docs and are tested with fake input only. If a config file cannot be parsed (comments, for example), it is left as it is.
 - Codex does not run hooks until you trust them. After `install`, open `/hooks` in a newly opened session and trust the nenwa hooks.
 - Codex asks for approval each time it calls a nenwa tool (so a non-interactive run such as `codex exec` cannot call them). Whether to drop that approval is your decision. To do so, add `default_tools_approval_mode = "approve"` under `[mcp_servers.nenwa]` in `~/.codex/config.toml`; Codex can then message other agents without asking you. Running `nenwa install` again removes that line.
 - When something does not arrive, run `nenwa doctor`. For each agent it shows whether it is installed, whether nenwa is registered, and whether a conversation is visible.
-- Cursor's `beforeSubmitPrompt` cannot add text to the conversation, so messages are not taken out there.
 - If the daemon is not running, the hooks exit without output (they never block the agent).
 
 ## Connecting Grok Bot (inbox)
@@ -240,17 +223,11 @@ cargo test
 
 This runs the small tests inside `src/` (HMAC, escaping the frame, address format, invite strings, and so on) and the end-to-end tests in `tests/e2e.rs`. The end-to-end tests run the built executable with `NENWA_HOME` and `HOME` (`USERPROFILE` on Windows) pointing at a temporary folder, so they never touch your real `~/.nenwa` or `~/.claude`.
 
-They start daemons for two people (with `NENWA_RELAY=disabled`, no relay or DNS is used and they connect through the LAN addresses in the invite), fake Claude Code sessions (named pipes on Windows), a fake webhook and a fake codex, and check: the list, delivery, unknown addresses, inboxes (waking by webhook, not waking again, reading while waiting, replying under the inbox name, replies to terminal, which MCP tools are shown), the Cursor and Codex hooks (address, injection, continuing at stop, codex queue and its failure, the MCP sender, no daemon), setup and --remove, retries while offline, and delivery and invite with P2P off. They take about 10 seconds. To look at the logs, keep the temporary folder with `NENWA_TEST_KEEP=1 cargo test`.
-
 GitHub Actions (`.github/workflows/ci.yml`) runs fmt, clippy and the tests on Linux and Windows, builds the executables (two Linux musl builds and Windows) and tries the install scripts against them. macOS is tested locally.
 
 ## Releases
 
 Set the version in `Cargo.toml`, then push a tag with the same number (`git tag v0.1.0 && git push origin v0.1.0`). `.github/workflows/release.yml` builds for macOS (Apple silicon and Intel), Linux (x86_64 and arm64, musl) and Windows (x86_64), and publishes a GitHub Release with the archives, one `SHA256SUMS` and the two install scripts. The install one-liners above download from the latest release.
-
-## Left out
-
-Agents other than the ones above (Kimi CLI, Kiro CLI and others can connect the same way through an `mcp --as <name>` inbox; messages arrive only when they call check_inbox themselves), a signed member list, account sign-in, file attachments, approval pop-ups (`ask_user`), a menu bar display, and a self-hosted relay.
 
 ## Caveats
 

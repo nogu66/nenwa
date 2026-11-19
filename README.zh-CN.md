@@ -72,8 +72,6 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 & ([scriptblock]::Create((irm https://github.com/nogu66/nenwa/releases/latest/download/install.ps1))) join <邀请>
 ```
 
-每台电脑上的守护进程通过 P2P 互连，智能体通过 MCP 发送。
-
 ## 工作原理
 
 <p align="center">
@@ -83,21 +81,10 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
   </picture>
 </p>
 
-```
-Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC, TLS 加密)
-你: nenwa send/who ──────┼──────────▶ nenwa daemon ⇄ 对方的 nenwa daemon ─▶ 对方的 Claude Code
-                         ┘ ~/.nenwa/sock
-```
-
-- **连接方式**：[iroh](https://github.com/n0-computer/iroh)。以电脑的公钥作为地址，通过 n0 的 DNS 和 relay 寻找对方，能打洞时直接连接。无法直连时经由 relay 转发（内容仍保持加密）。
-- **邀请与同伴列表**：邀请字符串是团队密钥加上第一台电脑的地址（公钥、relay、局域网地址），用 base64url 编码。连接后，双方交换各自已知的同伴地址，并连接到原本不认识的同伴。同伴保存在 `~/.nenwa/peers.json`，每次启动时重新连接。
-- **身份验证**：连接后立即互相发送 `HMAC(团队密钥, 自己的公钥 + 对方的公钥)`，不匹配就断开。
-- **发送者校验**：一台电脑只能以它自己那个人的名字发送（`from` 若不是 hello 中声明的人和机器则拒绝）。
-- **投递**：Claude Code 会为每个打开的会话在 `~/.claude/sessions/<pid>.json` 中写入接收套接字（`messagingSocketPath`）。收到消息的守护进程向其中写入一行 `{"type":"user",...}`。会话正在工作时，消息会在工具调用之间送达；空闲时，会从那里开始一个新回合。
-- **包装**：送达的正文用 `<nenwa-message from="..." id="...">` 包起来，并注明这不是用户的指令。正文中的闭合标签会被无效化。
-- **重发**：对方电脑离线时，消息存放在 `~/.nenwa/outbox.json`，连上后再发送。接收方返回 ack，同一个 id 不会投递两次。
-- **防失控**：每个发送者每分钟最多 20 条。没有人工输入时，智能体之间最多连续回复 10 次（沿 `reply_to` 追溯计数）。
-- **地址名称**：`<人>/<文件夹名>-<会话 ID 前 4 位>@<机器>`（例：`alice/api-3f2a@alice-mbp`）。执行 `/clear` 后 ID 会变，名称也会随之改变。从终端发送时为 `<人>/terminal@<机器>`。
+- **连接**：电脑之间通过 [iroh](https://github.com/n0-computer/iroh)（QUIC，加密）点对点连接。能直连就直连，不行就经过中继；两种情况下内容都保持加密。
+- **谁能加入**：只有持有团队密钥的电脑，密钥通过邀请获得。一台电脑只能用自己的名字发送。
+- **投递**：守护进程把消息放进打开的会话，正文用 `<nenwa-message from="..." id="...">` 包裹，并注明这不是用户的指示。对方电脑离线时消息会被保留，重新连上后再发送。
+- **防失控**：同一发送方每分钟最多 20 条；在没有人输入的情况下，智能体之间最多连续回复 10 次。
 
 完整的设计（信任模型、各个智能体的接入方式）见 [DESIGN.md](DESIGN.md)（英文）。
 
@@ -128,7 +115,7 @@ Claude Code 中出现两个工具（对于 Grok Bot 等拥有收件箱的一方�
 |---|---|---|---|
 | Codex | `SessionStart` 钩子 | 用 `codex queue --thread <ID>` 放入对话（在那里开始工作） | 相同。失败时放入收件箱，在 `PostToolUse` 插入，或在 `Stop` 时让它继续 |
 | Cursor | `sessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `postToolUse` 插入，并在 `stop` 时用 `followup_message` 让它继续 |
-| OpenCode | 插件（对话创建时、输入时） | 发送到 OpenCode 的本地服务器（`POST /session/<ID>/prompt_async`），放入对话（在那里开始工作） | 相同。失败时放入收件箱，附加到下一次工具结果中，或在回答结束时让它继续 |
+| OpenCode | 插件（会话创建时，或你输入时） | 插件一直在等待消息，消息一到就放进会话（会话随即开始工作）。使用 `opencode serve` 时，守护进程直接发送到本地服务器 | 相同。否则追加到工具结果，或在会话进入空闲时让它继续 |
 | Pi | 扩展（对话开始时） | 扩展一直在等待消息，收到后放入对话（在那里开始工作）。发送方看到的是 `inbox` | 相同（在当前步骤之后放入） |
 | Copilot CLI | `sessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `postToolUse` 插入，并在 `agentStop` 时用 `decision: "block"` 让它继续 |
 | Antigravity CLI | `SessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `PreInvocation`（每次调用模型之前）用 `injectSteps` 插入，并在 `Stop` 时用 `decision: "continue"` 让它继续 |
@@ -136,15 +123,11 @@ Claude Code 中出现两个工具（对于 Grok Bot 等拥有收件箱的一方�
 | Qwen Code | `SessionStart` 钩子 | 在收件箱中等待（下次运行时送达） | 在 `UserPromptSubmit` 和 `PostToolUse` 插入，并在 `Stop` 时用 `decision: "block"` 让它继续 |
 
 - 地址为 `<人>/<文件夹名>-<对话 ID 后 4 位>@<机器>`。会话开始时，会把这个地址告知对话。
-- 钩子和 MCP 服务器（`mcp --agent <名称>`）会把启动自己的父进程告诉守护进程。守护进程把两次钩子调用共有的父进程记为该智能体本身。通过 MCP 发送时，发送者就是由同一个智能体进程启动的对话。在还不知道该进程时，会选择"正在工作、文件夹匹配、最近活动过"的对话。
 - 智能体进程已消失的对话会从列表中移除（向它发送会得到 `no_session`）。
-- OpenCode 已用 1.1.8 的 `opencode serve` 确认：注册、向空闲对话投递、进程消失后返回 `no_session`。对话开始时不会告知它自己的地址（否则仅此就会触发一次回答）。只接受本机（127.0.0.1）的服务器地址。
-- Pi 已用 0.82.1 的 RPC 模式确认：扩展能加载、对话出现在列表中、消息能让空闲对话开始工作、工具调用的发送者是该对话。
-- Gemini CLI、Antigravity CLI、Qwen Code 和 Copilot CLI 的支持是按官方文档实现的，只用伪造的输入测试过，尚未在真实工具上确认。如果 `settings.json` 无法解析（例如带注释），则保持原样不修改。
+- 已在真实工具上验证：Claude Code、Codex、Cursor、OpenCode（1.19.6）、Pi（0.82.1）和 Grok Bot。Gemini CLI、Antigravity CLI、Qwen Code 和 Copilot CLI 按官方文档实现，只用模拟输入测试过。配置文件无法解析时（例如带注释），保持原样。
 - Codex 在信任钩子之前不会运行它们。`install` 之后，在新打开的会话中打开 `/hooks`，信任 nenwa 的钩子。
 - Codex 每次调用 nenwa 的工具都会请求批准（因此 `codex exec` 这类非交互运行无法调用）。是否取消批准由你自己决定。如果要取消，在 `~/.codex/config.toml` 的 `[mcp_servers.nenwa]` 下添加 `default_tools_approval_mode = "approve"`；这样 Codex 就可以不经确认向其他智能体发送消息。重新运行 `nenwa install` 会移除这一行。
 - 消息送不到时，运行 `nenwa doctor`。它会按智能体显示：是否已安装、nenwa 是否已注册、是否能看到对话。
-- Cursor 的 `beforeSubmitPrompt` 无法向对话添加文字，所以不在那里取出消息。
 - 如果守护进程没有运行，钩子会不输出任何内容直接结束（不会阻塞智能体）。
 
 ## 连接 Grok Bot（收件箱）
@@ -240,17 +223,11 @@ cargo test
 
 会运行 `src/` 中的小型测试（HMAC、跳出包装、地址格式、邀请字符串等）和 `tests/e2e.rs` 中的端到端测试。端到端测试把构建出的可执行文件放在临时文件夹的 `NENWA_HOME` 和 `HOME`（Windows 为 `USERPROFILE`）下运行，所以不会碰到真正的 `~/.nenwa` 或 `~/.claude`。
 
-测试会启动两个人的守护进程（使用 `NENWA_RELAY=disabled`，不用 relay 也不用 DNS，通过邀请中的局域网地址连接）、伪造的 Claude Code 会话（Windows 上为命名管道）、伪造的 webhook 和伪造的 codex，并检查：列表、投递、不存在的地址、收件箱（用 webhook 唤醒、不重复唤醒、边等待边读取、以收件箱名回复、对 terminal 的回复、MCP 工具的区分显示）、Cursor 和 Codex 的钩子（地址、插入、在 stop 时继续、codex queue 及其失败、MCP 的发送者、没有守护进程时）、setup 和 --remove、离线时的重发、P2P 关闭时的投递和 invite。大约 10 秒完成。想查看日志时，用 `NENWA_TEST_KEEP=1 cargo test` 保留临时文件夹。
-
 GitHub Actions（`.github/workflows/ci.yml`）在 Linux 和 Windows 上运行 fmt、clippy 和测试，构建发布用的可执行文件（两种 Linux musl 版本和 Windows 版本）并保存为构件。macOS 在本地运行。
 
 ## 发布
 
 在 `Cargo.toml` 中设定版本号，然后推送同号的标签（`git tag v0.1.0 && git push origin v0.1.0`）。`.github/workflows/release.yml` 会为 macOS（Apple 芯片和 Intel）、Linux（x86_64 和 arm64，musl）以及 Windows（x86_64）构建，并发布 GitHub Release，其中包含压缩包、一个 `SHA256SUMS` 和两个安装脚本。上面的一行安装命令从最新的发布下载。
-
-## 舍弃的功能
-
-上面列出的以外的智能体（Kimi CLI、Kiro CLI 等也可以用 `mcp --as <名称>` 的收件箱以同样方式连接；只有在它们自己调用 check_inbox 时才会收到消息）、带签名的成员名单、账户登录、文件附件、审批弹窗（`ask_user`）、菜单栏显示、自建 relay。
 
 ## 注意事项
 
