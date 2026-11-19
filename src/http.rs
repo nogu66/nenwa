@@ -149,6 +149,16 @@ fn json_res(status: StatusCode, v: &Value) -> Res {
     r
 }
 
+// 断るときも、小さい本文は読み捨ててから返す。
+// 読み残したまま接続を閉じると、Windows では相手に強制切断（10053）が伝わり、応答が届かないことがある。
+async fn reject(req: Request<Incoming>, res: Res) -> Res {
+    let declared = req.headers().get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
+    if declared.is_none_or(|n| n <= MAX_BODY as u64) {
+        let _ = tokio::time::timeout(Duration::from_secs(2), Limited::new(req.into_body(), MAX_BODY).collect()).await;
+    }
+    res
+}
+
 impl Gate {
     fn limits(&self) -> std::sync::MutexGuard<'_, Limits> {
         self.limits.lock().unwrap_or_else(|e| e.into_inner())
@@ -204,27 +214,27 @@ impl Gate {
     async fn handle(&self, req: Request<Incoming>) -> Res {
         let now = now_ms();
         if self.locked(now) {
-            return text(StatusCode::SERVICE_UNAVAILABLE, "temporarily unavailable\n");
+            return reject(req, text(StatusCode::SERVICE_UNAVAILABLE, "temporarily unavailable\n")).await;
         }
         if req.uri().path() != "/mcp" {
-            return text(StatusCode::NOT_FOUND, "not found\n");
+            return reject(req, text(StatusCode::NOT_FOUND, "not found\n")).await;
         }
         if req.method() != Method::POST {
             let mut r = text(StatusCode::METHOD_NOT_ALLOWED, "method not allowed\n");
             r.headers_mut().insert(ALLOW, HeaderValue::from_static("POST"));
-            return r;
+            return reject(req, r).await;
         }
         let who = self.mailbox(&req).filter(|_| !self.expires.is_some_and(|e| now >= e));
         let Some((key, name)) = who else {
             self.failed(now);
             let mut r = text(StatusCode::UNAUTHORIZED, "unauthorized\n");
             r.headers_mut().insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
-            return r;
+            return reject(req, r).await;
         };
         if !self.allowed(&key, now) {
             let mut r = text(StatusCode::TOO_MANY_REQUESTS, "too many requests\n");
             r.headers_mut().insert(RETRY_AFTER, HeaderValue::from_static("60"));
-            return r;
+            return reject(req, r).await;
         }
         let declared = req.headers().get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
         if declared.is_some_and(|n| n > MAX_BODY as u64) {
