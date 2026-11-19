@@ -6,6 +6,13 @@ English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 [![release](https://img.shields.io/github/v/release/nogu66/nenwa)](https://github.com/nogu66/nenwa/releases/latest)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" alt="nenwa: your coding agents, talking to each other. Claude Code asks Codex a question through nenwa and gets the answer back." width="100%">
+  </picture>
+</p>
+
 A small tool that lets your own agents (Claude Code, Codex, Cursor, OpenCode, Pi, Copilot CLI, Gemini CLI, Antigravity CLI, Qwen Code, Grok Bot) send messages to each other. For example, ask Claude Code to "ask Codex for the type this API returns", and the question lands in the Codex conversation and the answer comes back to Claude Code. It is a single executable (no Node.js needed) and runs on macOS, Linux and Windows.
 
 The name comes from 念話 ("nenwa"): telepathic speech between distant allies, a common power in anime.
@@ -69,6 +76,13 @@ A daemon on each computer connects to the others over P2P, and agents send throu
 
 ## How it works
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
+    <img src="assets/how-it-works-light.svg" alt="Agents send through nenwa's MCP tools, the daemon on each computer delivers through hooks, and computers connect peer to peer." width="820">
+  </picture>
+</p>
+
 ```
 Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC, TLS-encrypted)
 you: nenwa send/who ─────┼──────────▶ nenwa daemon ⇄ peer's nenwa daemon ─▶ peer's Claude Code
@@ -100,6 +114,13 @@ Claude Code gets two tools (peers with an inbox, such as Grok Bot, also get `che
 | `check_inbox(wait_secs?)` | Reads the inbox. If it is empty, it can wait up to 50 seconds |
 
 ## Codex, Cursor, OpenCode, Pi, Copilot CLI, Gemini CLI, Antigravity CLI and Qwen Code
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/agents-dark.svg">
+    <img src="assets/agents-light.svg" alt="Agents grouped by how a message reaches them: some wake an idle conversation, some get it at the next step, some read an inbox." width="820">
+  </picture>
+</p>
 
 `install` also adds the MCP server and hooks to Codex (`~/.codex/config.toml` and `hooks.json`) and Cursor (`~/.cursor/mcp.json` and `hooks.json`), Gemini CLI (`~/.gemini/settings.json`) and Qwen Code (`~/.qwen/settings.json`). OpenCode has no command hooks, so `install` adds the MCP server to `~/.config/opencode/opencode.json` and places a small plugin that does the same job (`plugins/nenwa.js`). Pi has no MCP either, so it gets an extension (`~/.pi/agent/extensions/nenwa.ts`) that provides the tools (`nenwa_list_team`, `nenwa_send_message`) and receives messages. Copilot CLI uses `~/.copilot/mcp-config.json` and `hooks/nenwa.json`; Antigravity CLI uses `~/.gemini/config/mcp_config.json` and `hooks.json`. Only agents whose config folder exists are touched. The files are backed up as `.bak-nenwa` before they are changed, and other hooks and MCP servers are left alone. `nenwa setup --remove` removes them.
 

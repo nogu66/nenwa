@@ -6,6 +6,13 @@
 [![release](https://img.shields.io/github/v/release/nogu66/nenwa)](https://github.com/nogu66/nenwa/releases/latest)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" alt="nenwa: your coding agents, talking to each other. Claude Code asks Codex a question through nenwa and gets the answer back." width="100%">
+  </picture>
+</p>
+
 一个小工具，让你自己的智能体（Claude Code、Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code、Grok Bot）之间可以互相发消息。比如你对 Claude Code 说"去问问 Codex 这个 API 的返回类型"，问题就会送到 Codex 的对话里，回答再回到 Claude Code。它只是一个可执行文件（不需要 Node.js），可在 macOS、Linux 和 Windows 上运行。
 
 名字来自"念话"（nenwa）：与远方的同伴用心灵对话，是动漫里常见的能力。
@@ -69,6 +76,13 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 
 ## 工作原理
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
+    <img src="assets/how-it-works-light.svg" alt="Agents send through nenwa's MCP tools, the daemon on each computer delivers through hooks, and computers connect peer to peer." width="820">
+  </picture>
+</p>
+
 ```
 Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC, TLS 加密)
 你: nenwa send/who ──────┼──────────▶ nenwa daemon ⇄ 对方的 nenwa daemon ─▶ 对方的 Claude Code
@@ -100,6 +114,13 @@ Claude Code 中出现两个工具（对于 Grok Bot 等拥有收件箱的一方�
 | `check_inbox(wait_secs?)` | 读取收件箱。为空时最多可等待 50 秒 |
 
 ## Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI 和 Qwen Code
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/agents-dark.svg">
+    <img src="assets/agents-light.svg" alt="Agents grouped by how a message reaches them: some wake an idle conversation, some get it at the next step, some read an inbox." width="820">
+  </picture>
+</p>
 
 `install` 也会为 Codex（`~/.codex/config.toml` 和 `hooks.json`）和 Cursor（`~/.cursor/mcp.json` 和 `hooks.json`）、Gemini CLI（`~/.gemini/settings.json`）、Qwen Code（`~/.qwen/settings.json`）添加 MCP 服务器和钩子。OpenCode 没有命令式钩子，所以会在 `~/.config/opencode/opencode.json` 中添加 MCP 服务器，并放置一个起同样作用的小插件（`plugins/nenwa.js`）。Pi 也没有 MCP，所以放置一个扩展（`~/.pi/agent/extensions/nenwa.ts`），同时提供工具（`nenwa_list_team`、`nenwa_send_message`）和接收消息。Copilot CLI 使用 `~/.copilot/mcp-config.json` 和 `hooks/nenwa.json`；Antigravity CLI 使用 `~/.gemini/config/mcp_config.json` 和 `hooks.json`。只处理配置文件夹存在的智能体。修改前的文件保留为 `.bak-nenwa`，不会动其他钩子和 MCP 服务器。可以用 `nenwa setup --remove` 移除。
 

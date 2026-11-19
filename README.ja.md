@@ -6,6 +6,13 @@
 [![release](https://img.shields.io/github/v/release/nogu66/nenwa)](https://github.com/nogu66/nenwa/releases/latest)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
+    <img src="assets/banner-light.svg" alt="nenwa: your coding agents, talking to each other. Claude Code asks Codex a question through nenwa and gets the answer back." width="100%">
+  </picture>
+</p>
+
 自分のエージェント同士（Claude Code、Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code、Grok Bot）がメッセージを送り合えるようにする小さなツール。たとえば Claude Code に「Codex にこの API の型を聞いて」と頼むと、Codex の会話に届き、返事が Claude Code に戻ってくる。1 つの実行ファイルで動く（Node.js は要らない）。Mac、Linux、Windows で動く。
 
 名前は「念話」（離れた仲間と心で話す、アニメでおなじみの力）から。
@@ -69,6 +76,13 @@ curl -fsSL https://github.com/nogu66/nenwa/releases/latest/download/install.sh |
 
 ## 仕組み
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/how-it-works-dark.svg">
+    <img src="assets/how-it-works-light.svg" alt="Agents send through nenwa's MCP tools, the daemon on each computer delivers through hooks, and computers connect peer to peer." width="820">
+  </picture>
+</p>
+
 ```
 Claude Code ─ nenwa mcp ─┐ unix socket          iroh (QUIC、TLS で暗号化)
 あなた: nenwa send/who ──┼──────────▶ nenwa daemon ⇄ 相手の nenwa daemon ─▶ 相手の Claude Code
@@ -100,6 +114,13 @@ Claude Code に出るツールは 2 つ（Grok Bot など受信箱を持つ相�
 | `check_inbox(wait_secs?)` | 受信箱を読む。空なら最長 50 秒待てる |
 
 ## Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/agents-dark.svg">
+    <img src="assets/agents-light.svg" alt="Agents grouped by how a message reaches them: some wake an idle conversation, some get it at the next step, some read an inbox." width="820">
+  </picture>
+</p>
 
 `install` で Codex（`~/.codex/config.toml` と `hooks.json`）と Cursor（`~/.cursor/mcp.json` と `hooks.json`）、Gemini CLI（`~/.gemini/settings.json`）、Qwen Code（`~/.qwen/settings.json`）にも MCP サーバーとフックを足す。OpenCode にはコマンド型のフックがないので、`~/.config/opencode/opencode.json` に MCP サーバーを足し、同じ役目の小さなプラグイン（`plugins/nenwa.js`）を置く。Pi には MCP もないので、ツール（`nenwa_list_team`、`nenwa_send_message`）と受け取りの両方をする拡張（`~/.pi/agent/extensions/nenwa.ts`）を置く。Copilot CLI は `~/.copilot/mcp-config.json` と `hooks/nenwa.json`、Antigravity CLI は `~/.gemini/config/mcp_config.json` と `hooks.json`。設定フォルダがあるものだけが対象。書き換える前のファイルは `.bak-nenwa` に残し、ほかのフックや MCP サーバーには触らない。`nenwa setup --remove` で外せる。
 
