@@ -465,8 +465,9 @@ impl Daemon {
         // Cursor の beforeSubmitPrompt は会話に足せないので、メッセージは次の postToolUse か stop まで取っておく。
         // OpenCode のプラグインと Copilot CLI も、入力のときは会話に足せない。Pi は待ち受けで受け取る。
         let prompt = matches!(agent, "cursor" | "opencode" | "copilot" | "pi") && event == "user-prompt-submit";
-        // Pi の拡張は、会話が開いている間ここで届くのを待つ（待機中でも、届いたらそこで動き出す）
-        let wait = if agent == "pi" && event == "wait" { 25.0 } else { 0.0 };
+        // Pi の拡張と OpenCode のプラグインは、会話が開いている間ここで届くのを待つ（待機中でも、届いたらそこで動き出す）。
+        // OpenCode の TUI は外から叩けるサーバーを持たないので、直接は届けられない。
+        let wait = if matches!(agent, "pi" | "opencode") && event == "wait" { 25.0 } else { 0.0 };
         let mail = if prompt { vec![] } else { self.take_inbox(&label, wait, false).await? };
         // OpenCode は始まったときに文脈を足す口がない（足すと、それだけで応答が始まってしまう）
         let intro = if event == "session-start" && agent != "opencode" {

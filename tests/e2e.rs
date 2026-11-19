@@ -867,6 +867,15 @@ fn opencode_手元のサーバーに送って会話に入れる_届かなけれ�
     assert!(hook_call(&c.alice, "opencode", "stop", away.clone()).unwrap()["text"].as_str().unwrap().contains("止まる前に"));
     assert_eq!(hook_call(&c.alice, "opencode", "stop", away.clone()), None);
 
+    // サーバーのない TUI では、プラグインが待ち受けで受け取る（待機中でも、届いたらすぐ返る）
+    let (h, waiting_input) = (c.alice.clone(), away.clone());
+    let waiter = std::thread::spawn(move || hook_call(&h, "opencode", "wait", waiting_input));
+    sleep(700);
+    let sent = Instant::now();
+    cli(&c.bob, &["send", "alice/site-aw4y@alice-mac", "待っている間に"]).unwrap();
+    assert!(waiter.join().unwrap().unwrap()["text"].as_str().unwrap().contains("待っている間に"));
+    assert!(sent.elapsed() < Duration::from_secs(5), "届いたらすぐ返る");
+
     hook_call(&c.alice, "opencode", "session-end", away);
     hook_call(&c.alice, "opencode", "session-end", input);
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains("alice/site-")));

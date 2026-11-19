@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 const NENWA = __NENWA_EXE__;
 
 // Runs `nenwa hook opencode <event>` and returns the text to put into the conversation, if any.
-function hook(event, input) {
+function hook(event, input, onSpawn) {
   return new Promise((resolve) => {
     let out = "";
     let p;
@@ -14,6 +14,7 @@ function hook(event, input) {
     } catch {
       return resolve("");
     }
+    onSpawn?.(p);
     p.stdout.on("data", (d) => (out += d));
     p.on("error", () => resolve(""));
     p.on("close", () => {
@@ -37,15 +38,48 @@ export const Nenwa = async ({ client, directory, serverUrl }) => {
       await client.session.promptAsync({ path: { id }, body: { parts: [{ type: "text", text }] } });
     } catch {}
   };
+  // The TUI has no HTTP server the daemon could post to, so each open conversation waits for its own mail here
+  // and puts it in from the inside. One-shot runs (`opencode run`) end by themselves, so they only send.
+  const oneShot = process.argv[2] === "run";
+  const listening = new Map(); // session id -> the waiting `nenwa hook` process
+  const listen = async (id) => {
+    if (oneShot || listening.has(id) || children.has(id)) return;
+    listening.set(id, null);
+    while (listening.has(id)) {
+      const began = Date.now();
+      const text = await hook("wait", input(id), (p) => {
+        if (listening.has(id)) listening.set(id, p);
+        p.unref?.();
+        p.stdout?.unref?.();
+      });
+      if (!listening.has(id)) break;
+      if (text) await say(id, text);
+      else if (Date.now() - began < 2000) await new Promise((r) => setTimeout(r, 5000).unref?.());
+    }
+  };
+  const unlisten = (id) => {
+    const p = listening.get(id);
+    listening.delete(id);
+    try {
+      p?.kill();
+    } catch {}
+  };
+  process.once("exit", () => [...listening.keys()].forEach(unlisten));
   return {
     event: async ({ event }) => {
       const p = event.properties ?? {};
       const info = p.info;
       if (event.type === "session.created" || event.type === "session.updated") {
         if (info?.parentID) children.add(info.id);
-        else if (info?.id && event.type === "session.created") await hook("session-start", input(info.id));
+        else if (info?.id && event.type === "session.created") {
+          await hook("session-start", input(info.id));
+          void listen(info.id);
+        }
       } else if (event.type === "session.deleted") {
-        if (info?.id && !children.delete(info.id)) await hook("session-end", input(info.id));
+        if (info?.id && !children.delete(info.id)) {
+          unlisten(info.id);
+          await hook("session-end", input(info.id));
+        }
       } else if (event.type === "session.idle") {
         if (p.sessionID && !children.has(p.sessionID)) {
           const text = await hook("stop", input(p.sessionID));
@@ -54,7 +88,9 @@ export const Nenwa = async ({ client, directory, serverUrl }) => {
       }
     },
     "chat.message": async ({ sessionID }) => {
-      if (sessionID && !children.has(sessionID)) await hook("user-prompt-submit", input(sessionID));
+      if (!sessionID || children.has(sessionID)) return;
+      await hook("user-prompt-submit", input(sessionID));
+      void listen(sessionID); // also covers a conversation that was resumed, not created, in this process
     },
     "tool.execute.after": async ({ sessionID }, output) => {
       if (!sessionID || children.has(sessionID)) return;
