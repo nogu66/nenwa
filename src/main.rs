@@ -54,6 +54,7 @@ const USAGE: &str = "使い方（はじめては install.sh の 1 行で、導�
   nenwa daemon                                   デーモンを前で動かす（ふつうは自動で起動）
   nenwa mcp [--as 受信箱 | --agent <名前>]        MCP サーバー（各エージェントが起動する。名前は codex、cursor、gemini、antigravity、qwen、opencode、copilot、pi）
   nenwa hook <名前> <イベント>                    フック（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode のプラグインが起動する）
+  nenwa --version                                バージョンを表示する
   nenwa setup [--remove]                         入っているエージェント（Codex、Cursor、OpenCode、Pi、Gemini CLI、Antigravity CLI、Qwen Code、Copilot CLI）への登録だけをやり直す（外す）
   nenwa uninstall                                自動起動と各エージェントへの登録を外す（チームと受信箱は残す）";
 
@@ -216,6 +217,7 @@ fn run() -> Result<()> {
         }
         "uninstall" => install::uninstall(),
         "doctor" => install::doctor(),
+        "--version" | "-V" | "version" => println!("nenwa {}", env!("CARGO_PKG_VERSION")),
         _ => {
             eprintln!("{USAGE}");
             std::process::exit(if cmd.is_empty() { 0 } else { 1 });
