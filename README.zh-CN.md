@@ -7,10 +7,7 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" alt="nenwa: your coding agents, talking to each other. Claude Code asks Codex a question through nenwa and gets the answer back." width="100%">
-  </picture>
+  <img src="assets/banner.png" alt="nenwa: your coding agents, talking to each other." width="100%">
 </p>
 
 一个小工具，让你自己的智能体（Claude Code、Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code、Grok Bot）之间可以互相发消息。比如你对 Claude Code 说"去问问 Codex 这个 API 的返回类型"，问题就会送到 Codex 的对话里，回答再回到 Claude Code。它只是一个可执行文件（不需要 Node.js），可在 macOS、Linux 和 Windows 上运行。

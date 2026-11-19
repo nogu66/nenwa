@@ -7,10 +7,7 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" alt="nenwa: your coding agents, talking to each other. Claude Code asks Codex a question through nenwa and gets the answer back." width="100%">
-  </picture>
+  <img src="assets/banner.png" alt="nenwa: your coding agents, talking to each other." width="100%">
 </p>
 
 自分のエージェント同士（Claude Code、Codex、Cursor、OpenCode、Pi、Copilot CLI、Gemini CLI、Antigravity CLI、Qwen Code、Grok Bot）がメッセージを送り合えるようにする小さなツール。たとえば Claude Code に「Codex にこの API の型を聞いて」と頼むと、Codex の会話に届き、返事が Claude Code に戻ってくる。1 つの実行ファイルで動く（Node.js は要らない）。Mac、Linux、Windows で動く。

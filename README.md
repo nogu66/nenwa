@@ -7,10 +7,7 @@ English | [日本語](README.ja.md) | [简体中文](README.zh-CN.md)
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/banner-dark.svg">
-    <img src="assets/banner-light.svg" alt="nenwa: your coding agents, talking to each other. Claude Code asks Codex a question through nenwa and gets the answer back." width="100%">
-  </picture>
+  <img src="assets/banner.png" alt="nenwa: your coding agents, talking to each other." width="100%">
 </p>
 
 A small tool that lets your own agents (Claude Code, Codex, Cursor, OpenCode, Pi, Copilot CLI, Gemini CLI, Antigravity CLI, Qwen Code, Grok Bot) send messages to each other. For example, ask Claude Code to "ask Codex for the type this API returns", and the question lands in the Codex conversation and the answer comes back to Claude Code. It is a single executable (no Node.js needed) and runs on macOS, Linux and Windows.
