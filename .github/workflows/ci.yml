@@ -1,5 +1,5 @@
-# Linux と Windows で fmt、clippy、テストを流し、配る実行ファイルを作って install スクリプトを試す（Release は release.yml が作る）。
-# Mac は Actions だと 10 倍に数えられるので、手元で確かめる。
+# Runs fmt, clippy and the tests on Linux and Windows, builds the binaries we ship and tries the install scripts (release.yml publishes the Release).
+# macOS minutes are billed at 10x on Actions, so macOS is checked locally.
 name: ci
 
 on:
@@ -30,7 +30,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
-        # 止まったテストがあると 6 時間走り続けるので、ここで打ち切って下の手順でログを出す
+        # A hung test would run for 6 hours, so stop here and let the step below print the logs
         timeout-minutes: 20
         env:
           NENWA_TEST_KEEP: "1"

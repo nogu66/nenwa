@@ -1,4 +1,4 @@
-// Mac: 自動起動は launchd の LaunchAgent。親プロセスは ps で調べる。
+// macOS: autostart is a launchd LaunchAgent. Parent processes are looked up with ps.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -25,11 +25,11 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
-// ログイン時にデーモンを起動する。登録した場所を返す。
+// Start the daemon at login. Returns where it was registered.
 pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::Result<String> {
     let (exe, home, log) =
         (xml_escape(&exe.to_string_lossy()), xml_escape(&nenwa_home.to_string_lossy()), xml_escape(&log.to_string_lossy()));
-    // launchd の PATH は /usr/bin:/bin:/usr/sbin:/sbin だけなので、codex（Homebrew の node スクリプト）が見つからない。登録したときの PATH を渡す。
+    // The launchd PATH is only /usr/bin:/bin:/usr/sbin:/sbin, so codex (a Homebrew node script) is not found. Pass the PATH from registration time.
     let path = xml_escape(&std::env::var("PATH").unwrap_or_default());
     let xml = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -47,8 +47,8 @@ pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::R
     );
     let plist = plist();
     let domain = domain();
-    // 中身が同じで、もう登録されているなら、起動し直すだけにする。
-    // 書き直して登録し直すと、そのたびに macOS が「バックグラウンド項目が追加されました」の通知を出す。
+    // If the content is the same and it is already registered, only restart it.
+    // Rewriting and registering again makes macOS show a "Background Items Added" notification every time.
     if std::fs::read_to_string(&plist).is_ok_and(|old| old == xml)
         && launchctl(&["print", &format!("{domain}/{LABEL}")])
         && launchctl(&["kickstart", "-k", &format!("{domain}/{LABEL}")])
@@ -58,7 +58,7 @@ pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::R
     std::fs::create_dir_all(plist.parent().unwrap())?;
     std::fs::write(&plist, xml)?;
     launchctl(&["bootout", &format!("{domain}/{LABEL}")]);
-    // bootout は外し終わる前に戻ることがあり、直後の bootstrap が「5: Input/output error」で失敗する。少し待って数回やり直す。
+    // bootout can return before removal finishes, and a bootstrap right after fails with "5: Input/output error". Wait a little and retry a few times.
     let mut last = String::new();
     for _ in 0..10 {
         let out = Command::new("launchctl").args(["bootstrap", &domain, &plist.to_string_lossy()]).output()?;
@@ -68,7 +68,7 @@ pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::R
         last = String::from_utf8_lossy(&out.stderr).trim().to_string();
         std::thread::sleep(std::time::Duration::from_millis(300));
     }
-    anyhow::bail!("launchctl bootstrap に失敗しました: {last}")
+    anyhow::bail!("launchctl bootstrap failed: {last}")
 }
 
 pub fn autostart_remove() {
@@ -76,8 +76,8 @@ pub fn autostart_remove() {
     let _ = std::fs::remove_file(plist());
 }
 
-// 自動起動に入っていて、その状態フォルダが今のものと同じときだけ起動し直す
-// （テストや別の NENWA_HOME で本物のデーモンを起こし直さない）。
+// Restart only when it is in autostart and its state folder is the current one
+// (do not restart the real daemon from tests or another NENWA_HOME).
 pub fn autostart_restart(nenwa_home: &Path) -> bool {
     let want = format!("<string>{}</string>", xml_escape(&nenwa_home.to_string_lossy()));
     match std::fs::read_to_string(plist()) {

@@ -1,6 +1,6 @@
-// nenwa muse: Muse（パソコンの上でコマンドを起動できないアシスタント）をつなぐ。
-// 受信箱 muse を作り、鍵を作ってクリップボードに入れ、デーモンの HTTP の入り口（http.rs）を開き、Tailscale Funnel で外に出す。
-// 既定では 2 時間で閉じる（デーモンが期限を見て、入り口と鍵と Funnel を閉じる）。
+// nenwa muse: connect Muse (an assistant that cannot start a command on this computer).
+// Creates the muse inbox, makes a key and puts it on the clipboard, opens the daemon's HTTP endpoint (http.rs), and publishes it through Tailscale Funnel.
+// By default it closes after 2 hours (the daemon watches the expiry and closes the endpoint, the key and Funnel).
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,7 +14,7 @@ use crate::os;
 use crate::state::{ask, now_ms};
 
 const MAILBOX: &str = "muse";
-// PATH になければ探す場所（launchd から動くデーモンの PATH は狭い）
+// Where to look if it is not on PATH (the PATH of a daemon run from launchd is narrow)
 const FALLBACKS: &[&str] =
     &["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"];
 
@@ -22,7 +22,7 @@ fn env(k: &str) -> Option<String> {
     std::env::var(k).ok().filter(|v| !v.is_empty())
 }
 
-// テストでは Tailscale にもクリップボードにも触らない
+// In tests, touch neither Tailscale nor the clipboard
 fn no_tailscale() -> bool {
     env("NENWA_TEST_NO_TAILSCALE").is_some()
 }
@@ -30,7 +30,7 @@ fn no_tailscale() -> bool {
 fn port() -> Result<u16> {
     match env("NENWA_HTTP_PORT") {
         None => Ok(http::DEFAULT_PORT),
-        Some(p) => p.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| anyhow::anyhow!("NENWA_HTTP_PORT が正しくありません")),
+        Some(p) => p.trim().parse::<u16>().ok().filter(|p| *p > 0).ok_or_else(|| anyhow::anyhow!("NENWA_HTTP_PORT is not valid")),
     }
 }
 
@@ -46,7 +46,7 @@ fn status_json(bin: &Path, args: &[&str]) -> Option<Value> {
     serde_json::from_slice(&out.stdout).ok()
 }
 
-// Funnel の設定のうち、この入り口（127.0.0.1:<port>）を外に出しているもの: (ホスト名, HTTPS のポート)
+// Of the Funnel configs, the ones publishing this endpoint (127.0.0.1:<port>): (host name, HTTPS port)
 fn our_funnel(bin: &Path, port: u16) -> Option<(String, String)> {
     let st = status_json(bin, &["funnel", "status", "--json"])?;
     let targets = [format!("http://127.0.0.1:{port}"), format!("http://localhost:{port}")];
@@ -63,8 +63,8 @@ fn our_funnel(bin: &Path, port: u16) -> Option<(String, String)> {
     })
 }
 
-// Tailscale を動かす。すぐ終わればその出力は見せない（失敗したときだけ見せる）。
-// 2 秒たっても終わらないときは、Funnel の有効化を待っているなどなので、そこからは出力をそのまま見せる。
+// Run Tailscale. If it finishes quickly, its output is not shown (only on failure).
+// If it has not finished after 2 seconds, it is waiting for Funnel to be enabled or the like, so from then on the output is shown as it comes.
 fn run_tailscale(bin: &Path, args: &[&str]) -> Result<()> {
     let mut child = Command::new(bin).args(args).stdin(Stdio::inherit()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
     let (tx, rx) = mpsc::channel::<String>();
@@ -106,7 +106,7 @@ fn run_tailscale(bin: &Path, args: &[&str]) -> Result<()> {
             eprintln!("  {line}");
         }
         bail!(
-            "tailscale {} が失敗しました（上の表示を見てください。Funnel が無効なら、表示された URL で有効にしてからもう一度）",
+            "tailscale {} failed (see the output above. If Funnel is disabled, enable it at the URL shown and run this again)",
             args.join(" ")
         );
     }
@@ -115,7 +115,7 @@ fn run_tailscale(bin: &Path, args: &[&str]) -> Result<()> {
 
 fn funnel_on(bin: &Path, port: u16) -> Result<String> {
     run_tailscale(bin, &["funnel", "--bg", &port.to_string()])?;
-    // 設定が status に出るまで少し待つことがある
+    // It can take a moment for the config to show up in status
     for _ in 0..20 {
         if let Some((host, p)) = our_funnel(bin, port) {
             return Ok(if p == "443" { format!("https://{host}/mcp") } else { format!("https://{host}:{p}/mcp") });
@@ -126,11 +126,11 @@ fn funnel_on(bin: &Path, port: u16) -> Result<String> {
         status_json(bin, &["status", "--json"]).and_then(|s| s["Self"]["DNSName"].as_str().map(|d| d.trim_end_matches('.').to_string()));
     match dns.filter(|d| !d.is_empty()) {
         Some(d) => Ok(format!("https://{d}/mcp")),
-        None => bail!("Funnel の URL が分かりませんでした（tailscale funnel status で確かめてください）"),
+        None => bail!("Could not find the Funnel URL (check with tailscale funnel status)"),
     }
 }
 
-// この入り口を出している Funnel だけを閉じる（ほかの用途の Funnel には触らない）
+// Close only the Funnel that publishes this endpoint (Funnels for other uses are not touched)
 pub fn funnel_off(port: u16) -> Result<()> {
     if no_tailscale() {
         return Ok(());
@@ -140,7 +140,7 @@ pub fn funnel_off(port: u16) -> Result<()> {
     run_tailscale(&bin, &["funnel", &format!("--https={https}"), "off"])
 }
 
-// ---- 鍵の受け渡し ----
+// ---- Handing over the key ----
 fn copy_to_clipboard(text: &str) -> bool {
     let candidates: &[(&str, &[&str])] = if cfg!(target_os = "macos") {
         &[("pbcopy", &[])]
@@ -158,29 +158,29 @@ fn copy_to_clipboard(text: &str) -> bool {
     })
 }
 
-// 鍵は画面に出さない。ファイルを指定したときはそこへ（権限 600）、なければクリップボードへ。
+// The key is not shown on screen. If a file is given it goes there (mode 600); otherwise to the clipboard.
 fn hand_over(key: &str, key_out: Option<&str>) -> Result<String> {
     if let Some(path) = key_out {
         let p = Path::new(path);
         os::write_private(p, &format!("{key}\n"))?;
         os::set_private(p);
-        return Ok(format!("{path} に書きました（権限 600。貼ったら消してください）"));
+        return Ok(format!("written to {path} (mode 600; delete it after pasting)"));
     }
     if no_tailscale() {
-        bail!("テストでは --key-out か NENWA_KEY_FILE で鍵の置き場を指定してください");
+        bail!("In tests, give the key location with --key-out or NENWA_KEY_FILE");
     }
     if !copy_to_clipboard(key) {
-        bail!("鍵をクリップボードに入れられませんでした。--key-out <ファイル> で書き出せます");
+        bail!("Could not copy the key to the clipboard. Use --key-out <file> to write it to a file");
     }
-    Ok("クリップボードに入れました（画面には出しません）".into())
+    Ok("copied to the clipboard (not shown on screen)".into())
 }
 
 fn hours_text(ttl_ms: Option<u64>) -> String {
     match ttl_ms {
-        None => "時間では閉じません。nenwa muse --off で閉じてください".into(),
-        Some(ms) if ms % 3_600_000 == 0 => format!("{} 時間後に自動で閉じます", ms / 3_600_000),
-        Some(ms) if ms % 60_000 == 0 => format!("{} 分後に自動で閉じます", ms / 60_000),
-        Some(ms) => format!("{} 秒後に自動で閉じます", ms.div_ceil(1000)),
+        None => "it does not close by itself; close it with nenwa muse --off".into(),
+        Some(ms) if ms % 3_600_000 == 0 => format!("closes by itself in {} hour(s)", ms / 3_600_000),
+        Some(ms) if ms % 60_000 == 0 => format!("closes by itself in {} minute(s)", ms / 60_000),
+        Some(ms) => format!("closes by itself in {} second(s)", ms.div_ceil(1000)),
     }
 }
 
@@ -192,11 +192,11 @@ fn off() -> Result<()> {
     let res = ask(json!({ "op": "http", "on": false }));
     http::clear();
     res?;
-    println!("Muse の入り口を閉じました（鍵は消しました。受信箱 {MAILBOX} の中身は残っています）");
+    println!("Closed the Muse endpoint (the key is deleted; messages in the {MAILBOX} inbox are kept)");
     Ok(())
 }
 
-// --名前 値 を取り出す
+// Takes out --name value
 fn flag(args: &mut Vec<String>, name: &str) -> Option<String> {
     let i = args.iter().position(|a| *a == format!("--{name}"))?;
     let v = args.get(i + 1)?.clone();
@@ -212,7 +212,7 @@ pub fn muse_command(args: &mut Vec<String>) -> Result<()> {
         None => 2.0,
         Some(h) => match h.trim().parse::<f64>() {
             Ok(h) if h.is_finite() && h >= 0.0 => h,
-            _ => bail!("--hours は 0 以上の数で（0 なら時間では閉じない）"),
+            _ => bail!("--hours must be a number 0 or greater (0 keeps it open)"),
         },
     };
     let key_out = flag(args, "key-out").or_else(|| env("NENWA_KEY_FILE"));
@@ -225,7 +225,7 @@ pub fn muse_command(args: &mut Vec<String>) -> Result<()> {
     let bin = if funnel {
         match tailscale_bin() {
             Some(b) => Some(b),
-            None => bail!("Tailscale が見つかりません。https://tailscale.com/download から入れてサインインしてから、もう一度"),
+            None => bail!("Tailscale was not found. Install it from https://tailscale.com/download, sign in, and run this again"),
         }
     } else {
         None
@@ -253,17 +253,17 @@ pub fn muse_command(args: &mut Vec<String>) -> Result<()> {
     };
 
     println!(
-        "Muse の入り口を開きました（{}）
+        "Opened the Muse endpoint ({})
 
-  URL:  {url}
-  鍵:   {where_key}
-  宛先: {address}
+  URL:     {url}
+  Key:     {where_key}
+  Address: {address}
 
-Muse でコネクタ（MCP）を足し、URL を入れて、鍵を Bearer トークンとして安全な入力欄に貼ってください。
-  - Muse 側で、このコネクタは「操作のたびに承認」にしてください。
-  - 開いている間は、権限確認を飛ばすモードの Claude Code の会話を開かないでください（Muse からの頼みがそのまま動きます）。
-  - この Mac が寝ている間はつながりません。
-  - もう一度 nenwa muse を実行すると鍵を作り直します（古い鍵はすぐ使えなくなります）。閉じるときは nenwa muse --off",
+In Muse, add an MCP connector, enter the URL, and paste the key as the Bearer token into a secure input field.
+  - In Muse, set this connector to approve every action.
+  - While it is open, do not keep Claude Code conversations running in a mode that skips permission prompts (a request from Muse would run there as it is).
+  - Nothing reaches this Mac while it sleeps.
+  - Running nenwa muse again makes a new key (the old one stops working at once). To close it: nenwa muse --off",
         hours_text(ttl_ms)
     );
     Ok(())

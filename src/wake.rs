@@ -1,6 +1,6 @@
-// 受信箱にメッセージが入ったとき、その持ち主（Grok Bot の routine など）を webhook で起こす。
-// 設定は ~/.nenwa/wake/<受信箱>.json に { url, key }。
-// 鍵が whsec_ で始まれば Standard Webhooks の署名、それ以外は Authorization: Bearer と X-Automation-Key で送る。
+// When a message enters an inbox, wake its owner (a Grok Bot routine, for example) through a webhook.
+// The config is { url, key } in ~/.nenwa/wake/<inbox>.json.
+// If the key starts with whsec_, send a Standard Webhooks signature; otherwise send Authorization: Bearer and X-Automation-Key.
 use anyhow::{Result, bail};
 use base64::Engine;
 use base64::engine::DecodePaddingMode;
@@ -37,13 +37,13 @@ fn is_http(s: &str) -> bool {
 
 pub fn save_wake(name: &str, url: &str, key: &str) -> Result<()> {
     if !is_http(url) {
-        bail!("webhook の URL が正しくありません");
+        bail!("The webhook URL is not valid");
     }
     if key.is_empty() {
-        bail!("鍵が空です");
+        bail!("The key is empty");
     }
     if is_http(key) || key == url {
-        bail!("入れたのは鍵ではなく URL のようです。sender key を入れ直してください");
+        bail!("That looks like a URL, not a key. Enter the sender key again");
     }
     os::make_private_dir(&state::wake_dir())?;
     let text = serde_json::to_string_pretty(&WakeConfig { url: url.into(), key: key.into() })? + "\n";
@@ -51,12 +51,12 @@ pub fn save_wake(name: &str, url: &str, key: &str) -> Result<()> {
     Ok(())
 }
 
-// Node の Buffer.from(s, "base64") と同じく、末尾の = の有無は問わない
+// Like Node's Buffer.from(s, "base64"), accept it with or without trailing =
 const LENIENT: GeneralPurpose =
     GeneralPurpose::new(&base64::alphabet::STANDARD, GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent));
 
 fn sign(secret: &str, id: &str, ts: &str, body: &str) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(&LENIENT.decode(secret).unwrap_or_default()).expect("HMAC は鍵の長さを選ばない");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&LENIENT.decode(secret).unwrap_or_default()).expect("HMAC accepts a key of any length");
     mac.update(format!("{id}.{ts}.{body}").as_bytes());
     format!("v1,{}", STANDARD.encode(mac.finalize().into_bytes()))
 }
@@ -77,7 +77,7 @@ pub fn wake_headers(key: &str, body: &str) -> Vec<(String, String)> {
     h
 }
 
-// 設定がなければ None。あれば HTTP の状態コード。止まって待つので、デーモンからは別のスレッドで呼ぶ。
+// None if there is no config. Otherwise the HTTP status code. It blocks, so the daemon calls it on another thread.
 pub fn wake(name: &str, payload: &Value) -> Result<Option<u16>> {
     let Some(c) = load_wake(name) else { return Ok(None) };
     let body = payload.to_string();
@@ -90,27 +90,27 @@ pub fn wake(name: &str, payload: &Value) -> Result<Option<u16>> {
     Ok(Some(req.send(&body)?.status().as_u16()))
 }
 
-// URL のホスト（ポートつき）。new URL(url).host と同じ
+// The host of the URL (with port). Same as new URL(url).host
 fn host_of(url: &str) -> &str {
     let rest = url.split_once("://").map_or(url, |x| x.1);
     let host = rest.split(['/', '?', '#']).next().unwrap_or("");
     host.rsplit_once('@').map_or(host, |x| x.1)
 }
 
-// 鍵は画面にも会話にも出さない。画面に出さない入力か、NENWA_WAKE_KEY か、既存の { url, key } の JSON から読む。
+// The key is never shown on screen or in a conversation. It is read from hidden input, NENWA_WAKE_KEY, or an existing { url, key } JSON.
 pub fn wake_command(args: &[String]) -> Result<()> {
     let name = args.first().cloned().unwrap_or_default();
     if !is_mailbox_name(&name) {
-        bail!("受信箱の名前を指定してください（例: nenwa wake grok <URL>）");
+        bail!("Give an inbox name (for example: nenwa wake grok <URL>)");
     }
     let args = &args[1..];
     if args.first().map(String::as_str) == Some("--test") {
         if load_wake(&name).is_none() {
-            bail!("{name} の webhook はまだ設定されていません");
+            bail!("No webhook is set for {name} yet");
         }
-        let payload = json!({ "source": "nenwa", "mailbox": name, "test": true, "text": "nenwa からの試しの呼び出しです。何もしなくて大丈夫です。", "sent_at": now_iso() });
+        let payload = json!({ "source": "nenwa", "mailbox": name, "test": true, "text": "This is a test call from nenwa. You do not need to do anything.", "sent_at": now_iso() });
         let status = wake(&name, &payload)?.unwrap_or(0);
-        println!("webhook の応答: HTTP {status}");
+        println!("Webhook response: HTTP {status}");
         return Ok(());
     }
     let (url, key) = if args.first().map(String::as_str) == Some("--import") {
@@ -125,13 +125,16 @@ pub fn wake_command(args: &[String]) -> Result<()> {
         let url = args.first().cloned().unwrap_or_default();
         let key = match std::env::var("NENWA_WAKE_KEY") {
             Ok(k) if !k.is_empty() => k,
-            _ => rpassword::prompt_password("sender key を貼り付けて Enter（画面には出ません）: ")?.trim().to_string(),
+            _ => rpassword::prompt_password("Paste the sender key and press Enter (it is not shown): ")?.trim().to_string(),
         };
         (url, key)
     };
     save_wake(&name, &url, &key)?;
     ask(json!({ "op": "register", "name": name }))?;
-    println!("{name} の受信箱に届いたら {} の webhook を叩きます（鍵は ~/.nenwa/wake/{name}.json、権限 600）", host_of(&url));
+    println!(
+        "When a message reaches the {name} inbox, nenwa calls the webhook at {} (the key is in ~/.nenwa/wake/{name}.json, mode 600)",
+        host_of(&url)
+    );
     Ok(())
 }
 
@@ -140,8 +143,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 署名の形() {
-        // Standard Webhooks の仕様にある例
+    fn signature_format() {
+        // The example in the Standard Webhooks spec
         let sig = sign("MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", "msg_p5jXN8AQM9LWM0D4loKWxJek", "1614265330", r#"{"test": 2432232314}"#);
         assert_eq!(sig, "v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE=");
         let h = wake_headers("whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw", "{}");

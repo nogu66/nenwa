@@ -1,5 +1,5 @@
-// Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi、Antigravity CLI の設定に nenwa の MCP サーバーとフックを足す（外す）。
-// 書き換える前に一度だけ <ファイル>.bak-nenwa を残す。ほかのフックや MCP サーバーには触らない。
+// Add (or remove) nenwa's MCP server and hooks in the configs of Codex, Cursor, Gemini CLI, Qwen Code, OpenCode, Copilot CLI, Pi and Antigravity CLI.
+// Before rewriting, keep <file>.bak-nenwa once. Other hooks and MCP servers are not touched.
 use serde_json::{Map, Value, json};
 use std::path::{Path, PathBuf};
 
@@ -17,8 +17,8 @@ fn hook_command(agent: &str, event: &str) -> String {
     format!("{} hook {agent} {event}", os::quote(&exe().to_string_lossy()))
 }
 
-// パスでは見分けない。フォルダを移したときや、入れ直したときに、古い場所を指すフックが残って重なってしまうため。
-// 今の形は `…/nenwa' hook codex …`（Windows は `nenwa.exe"`）、TS 版の古い形は `…/cli.js' hook codex …`。
+// Do not tell them apart by path. When the folder is moved or nenwa is reinstalled, hooks pointing at the old location would remain and pile up.
+// The current form is `…/nenwa' hook codex …` (`nenwa.exe"` on Windows); the old form of the TS version is `…/cli.js' hook codex …`.
 fn is_our_command(c: &str) -> bool {
     for agent in ["codex", "cursor", "gemini", "qwen", "antigravity"] {
         let needle = format!(" hook {agent} ");
@@ -68,12 +68,12 @@ fn write_json(file: &Path, data: &Map<String, Value>) {
     }
 }
 
-// JavaScript の `x ||= {}`: 値が偽（なし、null、false、0、""）なら入れ直す
+// JavaScript's `x ||= {}`: reinsert when the value is falsy (missing, null, false, 0, "")
 fn ensure_obj<'a>(m: &'a mut Map<String, Value>, key: &str) -> &'a mut Map<String, Value> {
     if !m.get(key).is_some_and(|v| v.is_object()) {
         m.insert(key.into(), json!({}));
     }
-    m.get_mut(key).and_then(Value::as_object_mut).expect("いま入れた")
+    m.get_mut(key).and_then(Value::as_object_mut).expect("just inserted")
 }
 
 // ---- Codex ----
@@ -87,7 +87,7 @@ const CODEX_EVENTS: [(&str, &str, bool, u32); 5] = [
 const TOML_START: &str = "# nenwa:start";
 const TOML_END: &str = "# nenwa:end";
 
-// \n?# nenwa:start[\s\S]*?# nenwa:end\n? を "\n" に置き換える
+// Replace \n?# nenwa:start[\s\S]*?# nenwa:end\n? with "\n"
 fn remove_blocks(text: &str) -> String {
     let mut out = String::new();
     let mut rest = text;
@@ -223,8 +223,8 @@ fn setup_cursor(remove: bool) -> Option<SetupResult> {
     Some(SetupResult { agent: "cursor", files: vec![mcp_file.display().to_string(), hooks_file.display().to_string()] })
 }
 
-// ---- Gemini CLI と Qwen Code ----
-// どちらも settings.json に mcpServers と hooks（Claude Code と同じ入れ子）を持つ。違うのはイベントの名前と、時間制限の単位。
+// ---- Gemini CLI and Qwen Code ----
+// Both keep mcpServers and hooks (nested the same way as Claude Code) in settings.json. The differences are the event names and the unit of the timeout.
 const GEMINI_EVENTS: [(&str, &str); 5] = [
     ("SessionStart", "session-start"),
     ("BeforeAgent", "user-prompt-submit"),
@@ -244,19 +244,19 @@ fn setup_settings_json(
     agent: &'static str,
     dir: PathBuf,
     events: &[(&str, &str)],
-    timeout: u32, // Gemini はミリ秒、Qwen は秒
+    timeout: u32, // milliseconds for Gemini, seconds for Qwen
     remove: bool,
 ) -> Option<SetupResult> {
     if !dir.exists() {
         return None;
     }
     let file = dir.join("settings.json");
-    // 読めない形（コメント入りなど）のときは、中身を失わないよう触らない
+    // If it cannot be parsed (comments, for example), leave it alone so that nothing is lost
     let mut data = match std::fs::read_to_string(&file) {
         Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
             Ok(Value::Object(m)) => m,
             _ => {
-                eprintln!("{agent}: {} を読めなかったので、そのままにしました", file.display());
+                eprintln!("{agent}: could not parse {}, left it as it is", file.display());
                 return None;
             }
         },
@@ -308,7 +308,7 @@ fn setup_settings_json(
 }
 
 // ---- OpenCode ----
-// コマンド型のフックがないので、同じ役目の小さなプラグインを置く。MCP は opencode.json に足す。
+// There are no command hooks, so place a small plugin that does the same job. MCP is added to opencode.json.
 const OPENCODE_PLUGIN: &str = include_str!("opencode_plugin.js");
 
 pub fn opencode_plugin_text() -> String {
@@ -330,13 +330,13 @@ fn setup_opencode(remove: bool) -> Option<SetupResult> {
     if !dir.exists() {
         return None;
     }
-    // opencode.jsonc があればそちらが使われている。コメント入りで読めないときは、中身を失わないよう触らない。
+    // If opencode.jsonc exists, that is the one in use. If it has comments and cannot be parsed, leave it alone so that nothing is lost.
     let file = if dir.join("opencode.jsonc").exists() { dir.join("opencode.jsonc") } else { dir.join("opencode.json") };
     let mut data = match std::fs::read_to_string(&file) {
         Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
             Ok(Value::Object(m)) => m,
             _ => {
-                eprintln!("opencode: {} を読めなかったので、そのままにしました", file.display());
+                eprintln!("opencode: could not parse {}, left it as it is", file.display());
                 return None;
             }
         },
@@ -357,7 +357,7 @@ fn setup_opencode(remove: bool) -> Option<SetupResult> {
         backup(&file);
         write_json(&file, &data);
     }
-    // プラグインのフォルダは plugins と plugin のどちらでも読まれる。もうあるほうに置く。
+    // The plugin folder is read as either plugins or plugin. Use the one that already exists.
     let plugins = if !dir.join("plugins").exists() && dir.join("plugin").exists() { dir.join("plugin") } else { dir.join("plugins") };
     let plugin = plugins.join("nenwa.js");
     if remove {
@@ -370,7 +370,7 @@ fn setup_opencode(remove: bool) -> Option<SetupResult> {
 }
 
 // ---- GitHub Copilot CLI ----
-// フックは ~/.copilot/hooks/ の中の *.json がすべて読まれるので、自分のファイルを 1 つ置く。MCP は mcp-config.json に足す。
+// Every *.json in ~/.copilot/hooks/ is read, so place one file of our own. MCP is added to mcp-config.json.
 const COPILOT_EVENTS: [(&str, &str); 5] = [
     ("sessionStart", "session-start"),
     ("userPromptSubmitted", "user-prompt-submit"),
@@ -399,7 +399,7 @@ fn setup_copilot(remove: bool) -> Option<SetupResult> {
         Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
             Ok(Value::Object(m)) => m,
             _ => {
-                eprintln!("copilot: {} を読めなかったので、そのままにしました", mcp_file.display());
+                eprintln!("copilot: could not parse {}, left it as it is", mcp_file.display());
                 return None;
             }
         },
@@ -445,7 +445,7 @@ fn setup_copilot(remove: bool) -> Option<SetupResult> {
 }
 
 // ---- Pi ----
-// Pi には MCP もコマンド型のフックもないので、ツールとフックの両方の役目をする拡張を 1 つ置く。
+// Pi has neither MCP nor command hooks, so place one extension that does the job of both the tools and the hooks.
 const PI_EXTENSION: &str = include_str!("pi_extension.ts");
 
 fn pi_dir() -> PathBuf {
@@ -473,9 +473,9 @@ fn setup_pi(remove: bool) -> Option<SetupResult> {
     Some(SetupResult { agent: "pi", files: vec![file.display().to_string()] })
 }
 
-// ---- Antigravity CLI（Gemini CLI の後継。フックの形は別物） ----
-// 設定は ~/.gemini/config/ の mcp_config.json と hooks.json。hooks.json はいちばん上が「フックの名前」。
-// SessionEnd と入力時のイベントはないので、モデルを呼ぶ前（PreInvocation）に差し込む。
+// ---- Antigravity CLI (successor to Gemini CLI. The hook format is different) ----
+// The config is mcp_config.json and hooks.json in ~/.gemini/config/. The top level of hooks.json is the "hook name".
+// There is no SessionEnd or input-time event, so insert before the model is called (PreInvocation).
 const ANTIGRAVITY_EVENTS: [(&str, &str); 3] = [("SessionStart", "session-start"), ("PreInvocation", "post-tool-use"), ("Stop", "stop")];
 
 fn antigravity_dir() -> Option<PathBuf> {
@@ -483,7 +483,7 @@ fn antigravity_dir() -> Option<PathBuf> {
         let d = PathBuf::from(d);
         return d.exists().then_some(d);
     }
-    // CLI を入れると ~/.gemini/antigravity-cli ができる（デスクトップ版だけのときは触らない）
+    // Installing the CLI creates ~/.gemini/antigravity-cli (do not touch it when only the desktop app is installed)
     let gemini = os::home_dir().join(".gemini");
     (gemini.join("antigravity-cli").exists() || gemini.join("config").exists()).then(|| gemini.join("config"))
 }
@@ -495,7 +495,7 @@ fn setup_antigravity(remove: bool) -> Option<SetupResult> {
             Ok(t) if !t.trim().is_empty() => match serde_json::from_str(&t) {
                 Ok(Value::Object(m)) => Some(m),
                 _ => {
-                    eprintln!("antigravity: {} を読めなかったので、そのままにしました", file.display());
+                    eprintln!("antigravity: could not parse {}, left it as it is", file.display());
                     None
                 }
             },
@@ -531,10 +531,10 @@ fn setup_antigravity(remove: bool) -> Option<SetupResult> {
     Some(SetupResult { agent: "antigravity", files: vec![mcp_file.display().to_string(), hooks_file.display().to_string()] })
 }
 
-// doctor 用: そのエージェントの設定に nenwa が入っているか。設定フォルダがなければ None。
+// For doctor: whether nenwa is in that agent's config. None if there is no config folder.
 pub fn registered(agent: &str) -> Option<bool> {
     let has = |file: PathBuf, needle: &str| std::fs::read_to_string(file).is_ok_and(|t| t.contains(needle));
-    // ほかのツールにも「hook codex」のような形のフックがあるので、nenwa の実行ファイルで終わるものだけを数える
+    // Other tools also have hooks shaped like "hook codex", so count only those that end with the nenwa executable
     let ours = |file: PathBuf, agent: &str| {
         ["nenwa' hook", "nenwa\\\" hook", "nenwa.exe\\\" hook", "nenwa.exe' hook"]
             .iter()
@@ -577,7 +577,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 自分のフックの見分け方() {
+    fn recognizes_own_hooks() {
         assert!(is_our_command("'/Users/a/.local/bin/nenwa' hook codex stop"));
         assert!(is_our_command("\"C:\\Users\\a\\nenwa.exe\" hook cursor stop"));
         assert!(is_our_command("'/usr/bin/node' '/old/place/src/cli.mjs' hook cursor stop"));
@@ -588,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn 目印の区間を消す() {
+    fn removes_marked_section() {
         let t = "a\n\n# nenwa:start\nx\n# nenwa:end\n";
         assert_eq!(remove_blocks(t), "a\n\n");
     }

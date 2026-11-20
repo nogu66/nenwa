@@ -1,6 +1,6 @@
-// Claude Code のセッションを見つけて、メッセージを押し込む。
-// 開いているセッションは ~/.claude/sessions/<pid>.json に自分の受信ソケット（messagingSocketPath）を書いている。
-// そこに {"type":"user",...} を 1 行書くと、ツール呼び出しの合間に届き、待機中ならそこでターンが始まる。
+// Find Claude Code sessions and push messages into them.
+// An open session writes its own receiving socket (messagingSocketPath) to ~/.claude/sessions/<pid>.json.
+// Writing one {"type":"user",...} line there delivers it between tool calls, and if the session is idle a turn starts there.
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,7 +34,7 @@ fn basename(p: &str) -> String {
     Path::new(p).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-// 宛先に使う名前は「フォルダ名-セッション ID の先頭 4 文字」。ほかのセッションが開いても閉じても変わらない。
+// The name used in the address is "folder name-first 4 characters of the session ID". It does not change when other sessions open or close.
 pub fn claude_sessions() -> Vec<ClaudeSession> {
     let Ok(dir) = std::fs::read_dir(sessions_dir()) else { return vec![] };
     let mut list: Vec<ClaudeSession> = dir
@@ -68,11 +68,11 @@ pub fn claude_sessions() -> Vec<ClaudeSession> {
     list
 }
 
-// 見たことのある宛先 → その会話のプロセス。/clear すると会話の ID が変わって宛先も変わるので、
-// 古い宛先に来たメッセージ（前の宛先への返事など）を、同じプロセスの今の会話に届けるために覚えておく。
+// Address seen before → the process of that conversation. /clear changes the conversation ID and so the address,
+// so this is remembered to deliver messages sent to an old address (a reply to the previous address, for example) to the current conversation of the same process.
 static FORMER: Mutex<BTreeMap<String, i64>> = Mutex::new(BTreeMap::new());
 
-// 宛先の会話を探す。今の宛先になければ、同じプロセスが前に名乗っていた宛先として探す。
+// Find the conversation for an address. If it is not a current address, look for it as one the same process used before.
 pub fn find_session(label: &str) -> Option<ClaudeSession> {
     let mut list = claude_sessions();
     if let Some(i) = list.iter().position(|s| s.label == label) {
@@ -83,8 +83,8 @@ pub fn find_session(label: &str) -> Option<ClaudeSession> {
     Some(list.swap_remove(i))
 }
 
-// MCP サーバーを起動した Claude Code の会話。親プロセスをさかのぼって、今の会話の ID を読む。
-// 環境変数は MCP サーバーを起動したときの ID のままで、/clear のあとは古くなるので、見つからないときだけ使う。
+// The Claude Code conversation that started the MCP server. Walk up the parent processes and read the current conversation ID.
+// The environment variable keeps the ID from when the MCP server started and goes stale after /clear, so it is used only when nothing is found.
 pub fn caller_session_id() -> Option<String> {
     let mut pid = os::own_parent_pid();
     for _ in 0..6 {
@@ -103,7 +103,7 @@ pub fn caller_session_id() -> Option<String> {
     std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|id| !id.is_empty())
 }
 
-// パスが \\.\pipe\ で始まれば名前付きパイプ、それ以外は unix ソケット（どちらも os に任せる）
+// A path starting with \\.\pipe\ is a named pipe; anything else is a unix socket (both are left to os)
 pub async fn post(socket_path: &str, text: &str) -> std::io::Result<()> {
     let line = json!({ "type": "user", "message": { "role": "user", "content": text } }).to_string() + "\n";
     os::post_line(socket_path, &line).await

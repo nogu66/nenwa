@@ -1,5 +1,5 @@
-// Windows: 手元の通信は名前付きパイプ、自動起動はタスク スケジューラ（ログオン時）。
-// プロセスは OpenProcess、親プロセスは Toolhelp で調べる。
+// Windows: the local socket is a named pipe, autostart is Task Scheduler (at logon).
+// Processes are looked up with OpenProcess, parent processes with Toolhelp.
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -33,7 +33,7 @@ fn default_home() -> PathBuf {
     home_dir().join(".nenwa")
 }
 
-// 名前付きパイプ \\.\pipe\nenwa-<ユーザー>。NENWA_HOME がふつうの場所でなければ、その場所ごとに別のパイプにする。
+// The named pipe \\.\pipe\nenwa-<user>. If NENWA_HOME is not in the default location, each location gets its own pipe.
 pub fn sock_path(nenwa_home: &Path) -> PathBuf {
     let mut name = format!(r"\\.\pipe\nenwa-{}", user_name());
     if nenwa_home != default_home() {
@@ -47,7 +47,7 @@ fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-// パイプはサーバーがいる間だけある（ファイルのように残らない）。つながずに確かめる。
+// A pipe exists only while its server does (it does not stay like a file). Check without connecting.
 pub fn sock_exists(path: &Path) -> bool {
     unsafe { WaitNamedPipeW(wide(&path.to_string_lossy()).as_ptr(), 1) != 0 }
 }
@@ -61,7 +61,7 @@ pub fn alive(pid: i64) -> bool {
     unsafe {
         let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
         if h.is_null() {
-            // 権限がないだけなら生きている
+            // If it is only a permission error, the process is alive
             return GetLastError() == ERROR_ACCESS_DENIED;
         }
         let mut code = 0u32;
@@ -96,12 +96,12 @@ pub fn own_parent_pid() -> i64 {
     parent_pid(unsafe { GetCurrentProcessId() } as i64).unwrap_or(0)
 }
 
-// フックのコマンドの囲み（Windows のパスに " は入らない）
+// Quoting of hook commands (Windows paths cannot contain ")
 pub fn quote(s: &str) -> String {
     format!("\"{s}\"")
 }
 
-// ユーザーのフォルダの中は、ほかのユーザーからは見えない（権限はそのまま）
+// Files inside the user's folder are not visible to other users (permissions are left as they are)
 pub fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(path, text)
 }
@@ -113,21 +113,21 @@ pub fn make_private_dir(path: &Path) -> std::io::Result<()> {
 pub fn set_private(_path: &Path) {}
 
 pub fn exe_path() -> Option<PathBuf> {
-    // canonicalize は \\?\ を付けてしまうので使わない
+    // canonicalize adds \\?\, so it is not used
     std::env::current_exe().ok()
 }
 
-// Windows には lsof がない。shutdown を知らない古いデーモンはいない（Windows 版はこの版から）。
+// Windows has no lsof. There are no old daemons that do not know shutdown (the Windows build starts with this version).
 pub fn stop_socket_holders(_sock: &Path) {}
 
-// 裏で動かすプロセスを、呼んだ側の端末から切り離す（窓も出さない）
+// Detach a background process from the caller's terminal (and show no window)
 pub fn detach(cmd: &mut Command) {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    // 子は、引き継げるハンドルをすべて受け取る。自分の標準入出力がパイプだと、デーモンがそれを握り続け、
-    // 出力を待っている呼び出し元（フックを起動した Codex など）がいつまでも終わらない。引き継ぎを外しておく。
+    // A child receives every inheritable handle. If own standard I/O is a pipe, the daemon keeps holding it, and
+    // the caller waiting for output (Codex running a hook, for example) never finishes. Turn inheritance off.
     for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
         unsafe {
             let h = GetStdHandle(id);
@@ -138,7 +138,7 @@ pub fn detach(cmd: &mut Command) {
     }
 }
 
-// タスク スケジューラから起動されると、自分だけの窓ができる。その窓を閉じて、ログは daemon.log に書く。
+// When started from Task Scheduler, it gets a window of its own. Close that window and write the log to daemon.log.
 pub fn prepare_daemon(log: &Path) {
     let mut list = [0u32; 4];
     if unsafe { GetConsoleProcessList(list.as_mut_ptr(), list.len() as u32) } != 1 {
@@ -157,7 +157,7 @@ pub fn prepare_daemon(log: &Path) {
     }
 }
 
-// Ctrl+C、窓を閉じた、ログオフ、シャットダウンのどれかが来るまで待つ
+// Wait until Ctrl+C, a closed window, logoff or shutdown arrives
 pub async fn terminated() {
     use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
     let (Ok(mut a), Ok(mut b), Ok(mut c), Ok(mut d)) = (ctrl_c(), ctrl_break(), ctrl_close(), ctrl_shutdown()) else {
@@ -171,14 +171,14 @@ pub async fn terminated() {
     }
 }
 
-// Claude Code のセッションの受信口に 1 行書いて閉じる。Windows では名前付きパイプ（\\.\pipe\…）。
+// Write one line to a Claude Code session's receiving end and close. On Windows it is a named pipe (\\.\pipe\…).
 pub async fn post_line(socket_path: &str, line: &str) -> std::io::Result<()> {
     use tokio::io::AsyncWriteExt;
     use tokio::net::windows::named_pipe::ClientOptions;
     if !(socket_path.starts_with(r"\\.\pipe\") || socket_path.starts_with(r"\\?\pipe\")) {
-        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("名前付きパイプではありません: {socket_path}")));
+        return Err(std::io::Error::new(std::io::ErrorKind::Unsupported, format!("Not a named pipe: {socket_path}")));
     }
-    // ほかの人が書いている間はパイプが空かない。少し待ってやり直す。
+    // The pipe is busy while someone else is writing. Wait a little and retry.
     let mut tries = 0;
     let mut c = loop {
         match ClientOptions::new().open(socket_path) {
@@ -195,7 +195,7 @@ pub async fn post_line(socket_path: &str, line: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-// ---- 自動起動（タスク スケジューラ、ログオン時） ----
+// ---- Autostart (Task Scheduler, at logon) ----
 fn schtasks(args: &[&str]) -> std::io::Result<std::process::Output> {
     Command::new("schtasks").args(args).stdin(Stdio::null()).output()
 }
@@ -204,7 +204,7 @@ fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-// タスクの XML。時間の上限なし、電池でも止めない、落ちたら 1 分後に起こし直す。
+// The task XML. No time limit, do not stop on battery, restart 1 minute after a crash.
 fn task_xml(exe: &Path, user: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-16"?>
@@ -229,15 +229,15 @@ fn task_xml(exe: &Path, user: &str) -> String {
 }
 
 pub fn autostart_install(exe: &Path, nenwa_home: &Path, _log: &Path) -> anyhow::Result<String> {
-    // タスクには環境変数を渡せないので、ふつうの場所（%USERPROFILE%\.nenwa）だけにする
+    // A task cannot be given environment variables, so only the default location (%USERPROFILE%\.nenwa) is supported
     if nenwa_home != default_home() {
-        anyhow::bail!("Windows の自動起動は、NENWA_HOME がふつうの場所（{}）のときだけ使えます", default_home().display());
+        anyhow::bail!("Autostart on Windows works only when NENWA_HOME is in the default location ({})", default_home().display());
     }
     let user = match std::env::var("USERDOMAIN") {
         Ok(d) if !d.is_empty() => format!("{d}\\{}", user_name()),
         _ => user_name(),
     };
-    // schtasks の /XML は UTF-16（BOM つき）で読む
+    // schtasks /XML reads UTF-16 (with BOM)
     let file = std::env::temp_dir().join("nenwa-task.xml");
     let mut bytes = vec![0xff, 0xfe];
     bytes.extend(task_xml(exe, &user).encode_utf16().flat_map(|u| u.to_le_bytes()));
@@ -245,10 +245,10 @@ pub fn autostart_install(exe: &Path, nenwa_home: &Path, _log: &Path) -> anyhow::
     let out = schtasks(&["/Create", "/TN", TASK, "/XML", &file.to_string_lossy(), "/F"])?;
     let _ = std::fs::remove_file(&file);
     if !out.status.success() {
-        anyhow::bail!("タスク スケジューラへの登録に失敗しました: {}", String::from_utf8_lossy(&out.stderr).trim());
+        anyhow::bail!("Registering with Task Scheduler failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     let _ = schtasks(&["/Run", "/TN", TASK]);
-    Ok(format!("タスク スケジューラの {TASK}"))
+    Ok(format!("{TASK} in Task Scheduler"))
 }
 
 pub fn autostart_remove() {
@@ -256,7 +256,7 @@ pub fn autostart_remove() {
     let _ = schtasks(&["/Delete", "/TN", TASK, "/F"]);
 }
 
-// タスクに入っていて、ふつうの場所を使っているときだけ、止めてからタスクで起動し直す。
+// Only when it is in the task and uses the default location, stop it and restart it through the task.
 pub fn autostart_restart(nenwa_home: &Path) -> bool {
     if nenwa_home != default_home() || !schtasks(&["/Query", "/TN", TASK]).is_ok_and(|o| o.status.success()) {
         return false;
@@ -277,7 +277,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 親プロセスとパイプの名前() {
+    fn parent_process_and_pipe_name() {
         assert!(alive(unsafe { GetCurrentProcessId() } as i64));
         assert!(own_parent_pid() > 0);
         let p = sock_path(Path::new(r"C:\tmp\x")).to_string_lossy().into_owned();

@@ -1,9 +1,9 @@
-// パソコンに 1 つ常駐するデーモン。
-// - 外側: iroh（QUIC で暗号化した P2P）。net.rs を見る。
-// - 内側: 手元の通信（unix ソケット）。CLI と MCP サーバーがここに who / send を聞きに来る。
-// - 配送: 宛先のセッションの受信ソケットに書く（claude.rs の post）。相手がオフラインなら outbox に置いて、つながったら送る。
-// - 受信箱: Claude Code 以外（Grok Bot など）は、受信箱に貯めて check_inbox で読ませ、webhook で起こす。
-// - HTTP の入り口: nenwa muse で開く（http.rs）。期限を過ぎたらここで閉じる。
+// The daemon: one stays running per computer.
+// - Outside: iroh (P2P encrypted with QUIC). See net.rs.
+// - Inside: the local socket (a unix socket). The CLI and the MCP server ask who / send here.
+// - Delivery: writes to the receiving socket of the target session (post in claude.rs). If the other computer is offline, the message goes to the outbox and is sent when it connects.
+// - Inboxes: peers other than Claude Code (Grok Bot and so on) get their messages stored in an inbox, read them with check_inbox, and are woken by webhook.
+// - HTTP endpoint: opened by nenwa muse (http.rs). It is closed here once it expires.
 use anyhow::{Result, anyhow, bail};
 use interprocess::local_socket::tokio::{Stream as LocalStream, prelude::*};
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, ToFsName};
@@ -22,11 +22,11 @@ use crate::net;
 use crate::state::{self, now_iso, now_ms, read_json, write_json_private};
 use crate::{http, muse, os, wake};
 
-const MAX_DEPTH: u32 = 10; // 人の入力なしにエージェント同士が続けて返事できる回数
-const RATE_PER_MIN: usize = 20; // 1 人の送り主から 1 分に受け取る数
+const MAX_DEPTH: u32 = 10; // how many times agents can reply to each other in a row without human input
+const RATE_PER_MIN: usize = 20; // how many messages are accepted from one sender per minute
 const ACK_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_WAIT: f64 = 50.0; // check_inbox が待てる秒数（MCP の呼び出しが切れないうちに返す）
-const WAKE_RETRY: u64 = 10 * 60_000; // 起こしてもまだ読まれていない間は、この時間がたつまで起こし直さない
+const MAX_WAIT: f64 = 50.0; // seconds check_inbox can wait (returns before the MCP call times out)
+const WAKE_RETRY: u64 = 10 * 60_000; // while a wake has not been followed by a read, do not wake again until this much time has passed
 const DAY: u64 = 24 * 3_600_000;
 
 macro_rules! log {
@@ -34,17 +34,17 @@ macro_rules! log {
 }
 pub(crate) use log;
 
-// 2 つ目のデーモンは正常に終わる
+// A second daemon exits normally
 #[derive(Debug)]
 pub struct AlreadyRunning;
 impl std::fmt::Display for AlreadyRunning {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("デーモンはもう動いています")
+        f.write_str("The daemon is already running")
     }
 }
 impl std::error::Error for AlreadyRunning {}
 
-// 覚えておく数に上限のある表。あふれたら古いものから忘れる。
+// A table with a limit on how many entries it remembers. When it overflows, the oldest are forgotten.
 pub struct Remember<T> {
     map: HashMap<String, T>,
     order: VecDeque<String>,
@@ -65,7 +65,7 @@ impl<T> Remember<T> {
     }
 }
 
-// フックでつながるエージェント（Codex、Cursor、Gemini CLI、Qwen Code、OpenCode、Copilot CLI、Pi、Antigravity CLI）の会話
+// A conversation of an agent connected through hooks (Codex, Cursor, Gemini CLI, Qwen Code, OpenCode, Copilot CLI, Pi, Antigravity CLI)
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Agent {
     pub agent: String,
@@ -76,18 +76,18 @@ pub struct Agent {
     pub status: String,
     #[serde(default)]
     pub seen: u64,
-    // エージェント本体のプロセス（0 はまだ分からない）。消えたら、その会話は閉じたものとして扱う。
+    // The agent's own process (0 means not known yet). Once it is gone, the conversation is treated as closed.
     #[serde(default)]
     pub pid: i64,
-    // 直前のフックの親の並び。次のフックと共通する最初のものが本体（間のシェルは毎回変わる）。
+    // The ancestor list of the previous hook. The first one shared with the next hook is the agent process (the shells in between change every time).
     #[serde(default)]
     pub anc: Vec<i64>,
-    // OpenCode の手元のサーバー（http://127.0.0.1:<ポート>）。ここに送ると会話に入る。
+    // OpenCode's local server (http://127.0.0.1:<port>). Sending here puts the message into the conversation.
     #[serde(default)]
     pub url: String,
 }
 
-// 自分のパソコンの中の http だけを受け付ける（フックの入力で、よそへ送らされないように）
+// Accept only http inside this computer (so that hook input cannot make it send somewhere else)
 fn local_url(u: &str) -> Option<String> {
     let rest = u.strip_prefix("http://")?;
     let host = rest.split(['/', '?', '#']).next()?;
@@ -105,7 +105,7 @@ fn pids(v: &Value) -> Vec<i64> {
     v.as_array().map(|a| a.iter().filter_map(Value::as_i64).filter(|p| *p > 1).take(8).collect()).unwrap_or_default()
 }
 
-// つながった（つながっていた）ほかのパソコン
+// Another computer that is (or was) connected
 pub struct Peer {
     pub id: String,
     pub person: String,
@@ -114,8 +114,8 @@ pub struct Peer {
     pub last_seen: u64,
     pub sessions: Vec<Value>,
     pub tx: Option<mpsc::UnboundedSender<String>>,
-    pub conn: u64,      // いま使っているつながりの番号
-    pub dialer: String, // そのつながりをかけた側の鍵
+    pub conn: u64,      // number of the connection in use now
+    pub dialer: String, // key of the side that dialed that connection
     pub handle: Option<iroh::endpoint::Connection>,
 }
 
@@ -124,14 +124,14 @@ pub struct St {
     pub known: net::Peers, // peers.json
     pub dialing: HashSet<String>,
     pub next_conn: u64,
-    pub pending: HashMap<String, oneshot::Sender<String>>, // メッセージ id → 返ってきた ack の state
-    depths: Remember<u32>,                                 // メッセージ id → 何往復目か（暴走よけ）
-    seen: Remember<u64>,                                   // 受け取ったメッセージ id → 時刻（再送の重複よけ）
-    rate: HashMap<String, Vec<u64>>,                       // 送り主 → 直近 1 分の受信時刻
+    pub pending: HashMap<String, oneshot::Sender<String>>, // message id → state of the ack that came back
+    depths: Remember<u32>,                                 // message id → which round trip it is (runaway guard)
+    seen: Remember<u64>,                                   // received message id → time (guards against duplicates from resends)
+    rate: HashMap<String, Vec<u64>>,                       // sender → receive times in the last minute
     outbox: Vec<Message>,
     mailboxes: Map<String, Value>,
-    waiters: HashMap<String, Vec<oneshot::Sender<()>>>, // 受信箱 → check_inbox で待っている人
-    wake_state: HashMap<String, (u64, bool)>,           // 受信箱 → (最後に起こした時刻, 読まれたか)
+    waiters: HashMap<String, Vec<oneshot::Sender<()>>>, // inbox → those waiting in check_inbox
+    wake_state: HashMap<String, (u64, bool)>,           // inbox → (time of the last wake, whether it has been read)
     agents: Vec<(String, Agent)>,
     pub last_presence: Vec<Value>,
 }
@@ -147,12 +147,12 @@ pub struct Daemon {
     http: tokio::sync::Mutex<Option<http::Running>>,
 }
 
-// 問い合わせの項目のうち、空でない文字列だけを取り出す
+// Of the request's fields, take only non-empty strings
 fn s<'a>(v: &'a Value, k: &str) -> Option<&'a str> {
     v.get(k).and_then(Value::as_str).filter(|x| !x.is_empty())
 }
 
-// JavaScript の Number(x) || 0
+// JavaScript's Number(x) || 0
 fn num(v: &Value) -> f64 {
     let n = match v {
         Value::Number(n) => n.as_f64().unwrap_or(0.0),
@@ -164,7 +164,7 @@ fn num(v: &Value) -> f64 {
     if n.is_nan() { 0.0 } else { n }
 }
 
-// JavaScript の String(x || "")
+// JavaScript's String(x || "")
 fn js_str(v: &Value) -> String {
     match v {
         Value::String(t) => t.clone(),
@@ -189,7 +189,7 @@ fn write_inbox(name: &str, list: &[Message]) {
     write_json_private(&inbox_file(name), &list);
 }
 
-// { t: "msg", ...msg } の形の 1 行
+// One line in the form { t: "msg", ...msg }
 pub fn wire_msg(msg: &Message) -> String {
     let mut m = Map::new();
     m.insert("t".into(), json!("msg"));
@@ -208,11 +208,11 @@ impl Daemon {
         format!("{}/{label}@{}", self.person, self.machine)
     }
 
-    // ---- 受信箱（Claude Code 以外の相手。terminal はいつもある） ----
-    // 受信箱を作れるのはこのパソコンの中からだけ（register / send --as / check_inbox）。外からは作れない。
+    // ---- Inboxes (peers other than Claude Code. terminal always exists) ----
+    // An inbox can be created only from inside this computer (register / send --as / check_inbox). Not from outside.
     fn register_mailbox(&self, st: &mut St, name: &str) -> Result<()> {
         if !is_mailbox_name(name) {
-            bail!("受信箱の名前は英小文字・数字・. _ - で 40 文字まで（例: grok）");
+            bail!("An inbox name can use lowercase letters, digits and . _ - (up to 40 characters; for example: grok)");
         }
         if st.mailboxes.contains_key(name) {
             return Ok(());
@@ -256,12 +256,12 @@ impl Daemon {
             "mailbox": address,
             "unread": list.len(),
             "from": from,
-            "text": format!("nenwa の受信箱（{address}）に新しいメッセージが {} 件あります。\
-                nenwa の check_inbox で読み、返事が要るものには send_message で reply_to を付けて返してください。\
-                MCP が使えないときは、下の commands をこのパソコンのローカル実行で使ってください。", list.len()),
+            "text": format!("The nenwa inbox ({address}) has {} new message(s). \
+                Read them with nenwa's check_inbox, and reply to the ones that need a reply with send_message, setting reply_to. \
+                If MCP is not available, run the commands below locally on this computer.", list.len()),
             "commands": {
                 "read": format!("{exe} inbox --as {name}"),
-                "reply": format!("{exe} send --as {name} --reply-to <id> <宛先> \"<返事>\""),
+                "reply": format!("{exe} send --as {name} --reply-to <id> <address> \"<reply>\""),
             },
             "sent_at": state::iso(now),
         });
@@ -303,8 +303,8 @@ impl Daemon {
         Ok(list)
     }
 
-    // ---- フックでつながるエージェント（Codex、Cursor） ----
-    // フックが呼ばれるたびにセッションを覚える。1 日見えなければ忘れる。
+    // ---- Agents connected through hooks (Codex, Cursor) ----
+    // Remember the session each time a hook is called. Forget it after one day unseen.
     fn live_agents<'a>(&self, st: &'a St) -> impl Iterator<Item = &'a Agent> {
         let now = now_ms();
         st.agents.iter().map(|(_, a)| a).filter(move |a| now.saturating_sub(a.seen) < DAY && (a.pid == 0 || os::alive(a.pid)))
@@ -331,7 +331,7 @@ impl Daemon {
             .or_else(|| input["workspacePaths"].get(0).and_then(Value::as_str).filter(|x| !x.is_empty()))
             .unwrap_or("")
             .to_string();
-        // Codex の ID は先頭が時刻なので、ばらつく末尾の 4 文字を使う。
+        // A Codex ID starts with a timestamp, so use the last 4 characters, which vary.
         let alnum: Vec<char> = id.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
         let tail: String = alnum[alnum.len().saturating_sub(4)..].iter().collect::<String>().to_lowercase();
         if !st.agents.iter().any(|(k, _)| *k == key) {
@@ -353,12 +353,12 @@ impl Daemon {
         }
         let now = now_ms();
         let a = &mut st.agents.iter_mut().find(|(k, _)| *k == key)?.1;
-        // 空なら今の状態のまま（待ち受けの呼び出しは、作業中かどうかを変えない）
+        // If empty, keep the current status (a wait call does not change whether it is working)
         if !status.is_empty() || a.status.is_empty() {
             a.status = if status.is_empty() { "idle" } else { status }.into();
         }
         a.seen = now;
-        // 本体が入れ替わった（同じ会話を開き直した）ら、調べ直す
+        // If the agent process was replaced (the same conversation was reopened), look it up again
         if a.pid != 0 && !anc.contains(&a.pid) && !os::alive(a.pid) {
             a.pid = 0;
         }
@@ -382,8 +382,8 @@ impl Daemon {
         Some(label)
     }
 
-    // MCP サーバーはどの会話から呼ばれたかを知らない。作業中（ツールを呼べるのは作業中）で、フォルダが合い、最近動いたものを選ぶ。
-    // 呼んだ MCP サーバーの親に本体がいる会話があれば、それに決まる。
+    // The MCP server does not know which conversation called it. Pick one that is working (tools can only be called while working), whose folder matches, and that moved recently.
+    // If some conversation has its agent process among the ancestors of the calling MCP server, that one is chosen.
     fn resolve_agent(&self, st: &St, agent: &str, cwd: Option<&str>, anc: &[i64]) -> Result<Agent> {
         let score = |a: &Agent| {
             (if a.pid != 0 && anc.contains(&a.pid) { 4 } else { 0 })
@@ -393,13 +393,13 @@ impl Daemon {
         let mut list: Vec<&Agent> = self.live_agents(st).filter(|a| a.agent == agent && a.status != "offline").collect();
         list.sort_by(|x, y| score(y).cmp(&score(x)).then(y.seen.cmp(&x.seen)));
         list.first().map(|a| (*a).clone()).ok_or_else(|| {
-            anyhow!("この {agent} のセッションがまだ nenwa に見えていません。nenwa install のあとに開いたセッションか、フックが信頼済みか（Codex は /hooks）を確かめてください")
+            anyhow!("nenwa cannot see this {agent} session yet. Check that the session was opened after nenwa install and that the hooks are trusted (/hooks in Codex)")
         })
     }
 
     async fn deliver_to_agent(&self, a: &Agent, msg: Message) -> &'static str {
         if a.agent == "codex" {
-            // 待機中でも作業中でも、codex queue なら会話に入る（待機中ならそこで動き出す）。だめならフックで渡す。
+            // Idle or working, codex queue puts it into the conversation (if idle, it starts working there). If that fails, hand it over through the hooks.
             let mut cmd = tokio::process::Command::new(&self.codex_bin);
             cmd.args(["queue", "--thread", &a.id, "--message", &frame(&msg)]);
             cmd.stdin(std::process::Stdio::null())
@@ -424,7 +424,7 @@ impl Daemon {
             }
         }
         if a.agent == "opencode" && !a.url.is_empty() {
-            // OpenCode は会話ごとに手元のサーバーを持つ。待機中でも作業中でも、ここに送れば会話に入る。
+            // OpenCode has a local server per conversation. Idle or working, sending here puts it into the conversation.
             let url = format!("{}/session/{}/prompt_async?directory={}", a.url, percent(&a.id).replace('/', "%2F"), percent(&a.cwd));
             let body = json!({ "parts": [{ "type": "text", "text": frame(&msg) }] }).to_string();
             let sent = tokio::task::spawn_blocking(move || {
@@ -443,7 +443,7 @@ impl Daemon {
         "inbox"
     }
 
-    // フックの出力。届いているメッセージがあれば、そのエージェントのやり方で会話に差し込む。
+    // Hook output. If messages have arrived, insert them into the conversation in that agent's way.
     async fn hook_event(&self, req: &Value) -> Result<Value> {
         let agent = req["agent"].as_str().unwrap_or("undefined");
         if !matches!(agent, "codex" | "cursor" | "gemini" | "qwen" | "opencode" | "copilot" | "pi" | "antigravity") {
@@ -462,16 +462,16 @@ impl Daemon {
         if event == "session-end" {
             return Ok(Value::Null);
         }
-        // Cursor の beforeSubmitPrompt は会話に足せないので、メッセージは次の postToolUse か stop まで取っておく。
-        // OpenCode のプラグインと Copilot CLI も、入力のときは会話に足せない。Pi は待ち受けで受け取る。
+        // Cursor's beforeSubmitPrompt cannot add to the conversation, so messages are held until the next postToolUse or stop.
+        // The OpenCode plugin and Copilot CLI cannot add to the conversation at input time either. Pi receives through its wait call.
         let prompt = matches!(agent, "cursor" | "opencode" | "copilot" | "pi") && event == "user-prompt-submit";
-        // Pi の拡張と OpenCode のプラグインは、会話が開いている間ここで届くのを待つ（待機中でも、届いたらそこで動き出す）。
-        // OpenCode の TUI は外から叩けるサーバーを持たないので、直接は届けられない。
+        // The Pi extension and the OpenCode plugin wait here for arrivals while the conversation is open (even when idle, it starts working once one arrives).
+        // The OpenCode TUI has no server that can be reached from outside, so it cannot be delivered to directly.
         let wait = if matches!(agent, "pi" | "opencode") && event == "wait" { 25.0 } else { 0.0 };
         let mail = if prompt { vec![] } else { self.take_inbox(&label, wait, false).await? };
-        // OpenCode は始まったときに文脈を足す口がない（足すと、それだけで応答が始まってしまう）
+        // OpenCode has no way to add context at start (adding it would start a response by itself)
         let intro = if event == "session-start" && agent != "opencode" {
-            format!("nenwa: このセッションの宛先は {} です。", self.own(&label))
+            format!("nenwa: this session's address is {}.", self.own(&label))
         } else {
             String::new()
         };
@@ -502,7 +502,7 @@ impl Daemon {
         if agent == "copilot" {
             return Ok(if event == "stop" { json!({ "decision": "block", "reason": text }) } else { json!({ "additionalContext": text }) });
         }
-        // Codex、Qwen Code、Gemini CLI は Claude Code と同じ形。Gemini だけイベントの名前と、続けさせるときの言葉が違う。
+        // Codex, Qwen Code and Gemini CLI use the same form as Claude Code. Only Gemini differs in the event names and in the word that makes it continue.
         if agent != "cursor" {
             let gemini = agent == "gemini";
             if event == "stop" {
@@ -527,7 +527,7 @@ impl Daemon {
         Ok(json!({ "additional_context": text }))
     }
 
-    // ---- 自分のセッション ----
+    // ---- Own sessions ----
     pub fn presence_of(&self, st: &St) -> Vec<Value> {
         let mut list: Vec<Value> =
             claude_sessions().into_iter().map(|s| json!({ "address": self.own(&s.label), "title": s.name, "status": s.status })).collect();
@@ -540,14 +540,14 @@ impl Daemon {
             st.mailboxes
                 .keys()
                 .filter(|n| *n != "terminal")
-                .map(|n| json!({ "address": self.own(n), "title": "受信箱", "status": "inbox" })),
+                .map(|n| json!({ "address": self.own(n), "title": "inbox", "status": "inbox" })),
         );
         list
     }
 
-    // 配送の順: Claude Code のセッション → フックのエージェント → 受信箱
+    // Delivery order: Claude Code session → hooked agent → inbox
     pub async fn deliver_local(&self, msg: Message) -> &'static str {
-        // msg.to はいつも正しい形（受け取るときと送るときに確かめてある）
+        // msg.to is always well formed (checked on receive and on send)
         let Some(to) = parse_address(&msg.to) else { return "no_session" };
         if let Some(s) = claude::find_session(&to.label) {
             return match claude::post(&s.socket, &frame(&msg)).await {
@@ -573,7 +573,7 @@ impl Daemon {
         "inbox"
     }
 
-    // ---- 仲間とのやり取り ----
+    // ---- Exchanges with peers ----
     pub fn peer_for(&self, person: &str, machine: &str) -> Option<String> {
         self.lock().peers.iter().find(|p| p.online && p.person == person && p.machine == machine).map(|p| p.id.clone())
     }
@@ -584,7 +584,7 @@ impl Daemon {
         }
     }
 
-    // 送って ack を待つ。返事がなければ None
+    // Send and wait for the ack. None if there is no reply
     pub async fn transmit(&self, peer_id: &str, msg: &Message) -> Option<String> {
         let (tx, rx) = oneshot::channel();
         self.lock().pending.insert(msg.id.clone(), tx);
@@ -613,7 +613,7 @@ impl Daemon {
                 .collect()
         };
         for item in items {
-            // 返事がなければ次につながったときにまた送る
+            // If there is no reply, send again the next time it connects
             let Some(state) = self.transmit(peer_id, &item).await else { return };
             let mut st = self.lock();
             st.outbox.retain(|x| x.id != item.id);
@@ -630,7 +630,7 @@ impl Daemon {
         recent.len() <= RATE_PER_MIN
     }
 
-    // 仲間から届く 1 行。中身は信用できないので、使う前に形を確かめる。
+    // One line from a peer. The content cannot be trusted, so check its shape before use.
     pub fn on_peer_line(self: &Arc<Self>, peer_id: &str, m: Value) {
         match m["t"].as_str().unwrap_or("") {
             "presence" => {
@@ -663,7 +663,7 @@ impl Daemon {
             st.peers.iter().find(|p| p.id == peer_id).map(|p| (p.person.clone(), p.machine.clone()))
         };
         let Some((pp, pm)) = peer else { return };
-        // パソコンは自分の人の名前でしか送れない。
+        // A computer can only send under its own person's name.
         let (Some(from), Some(to)) = (from, to) else { return ack("refused") };
         if from.person != pp || from.machine != pm || to.person != self.person || to.machine != self.machine {
             return ack("refused");
@@ -699,22 +699,22 @@ impl Daemon {
         ack(state);
     }
 
-    // ---- 内側の API ----
+    // ---- Inner API ----
     async fn send(&self, req: &Value) -> Result<Value> {
         let Some(target) = parse_address(&js_str(&req["to"])) else {
-            bail!("宛先は <人>/<セッション>@<マシン> の形で（例: alice/api@alice-mbp）。nenwa who で確認できます");
+            bail!("The address must look like <person>/<session>@<machine> (for example: alice/api@alice-mbp). Check it with nenwa who");
         };
         let body = match req["body"].as_str() {
             Some(b) if !b.trim().is_empty() => b.to_string(),
-            _ => bail!("本文が空です"),
+            _ => bail!("The message is empty"),
         };
         if js_len(&body) > MAX_BODY {
-            bail!("本文は {MAX_BODY} 文字まで");
+            bail!("The message can be up to {MAX_BODY} characters");
         }
         let reply_to = s(req, "reply_to").map(String::from);
         let msg = {
             let mut st = self.lock();
-            // 送り主: Codex / Cursor のセッション > 受信箱の名前（Grok Bot など）> Claude Code のセッション > ターミナル
+            // Sender: Codex / Cursor session > inbox name (Grok Bot and so on) > Claude Code session > terminal
             let hooked = match s(req, "agent") {
                 Some(kind) => Some(self.resolve_agent(&st, kind, s(req, "cwd"), &pids(&req["ancestors"]))?),
                 None => None,
@@ -733,10 +733,10 @@ impl Daemon {
                 (None, None, Some(label)) => (self.own(label), true),
                 _ => (self.own("terminal"), false),
             };
-            // 人（ターミナル）から送ると数え直し。エージェントの返事は 1 つ増える。
+            // Sending from a person (the terminal) restarts the count. An agent's reply adds one.
             let depth = if agent { reply_to.as_ref().and_then(|r| st.depths.map.get(r)).map_or(0, |d| d + 1) } else { 0 };
             if depth >= MAX_DEPTH {
-                bail!("人の入力なしのやり取りが {MAX_DEPTH} 回続いたので止めました。続けるならユーザーに確認してください");
+                bail!("Stopped after {MAX_DEPTH} replies in a row without human input. Check with your user before continuing");
             }
             let msg = Message { id: state::uuid(), from, to: target.to_string(), reply_to, body, sent_at: now_iso(), depth };
             st.depths.set(&msg.id, depth);
@@ -756,7 +756,7 @@ impl Daemon {
         st.outbox.push(msg);
         Self::save_outbox(&st);
         Ok(
-            json!({ "id": id, "from": from, "state": "queued", "note": format!("{}@{} がつながったら送ります", target.person, target.machine) }),
+            json!({ "id": id, "from": from, "state": "queued", "note": format!("Will be sent when {}@{} connects", target.person, target.machine) }),
         )
     }
 
@@ -796,16 +796,16 @@ impl Daemon {
             }
             "hook" => self.hook_event(req).await?,
             "http" => self.http_op(req).await?,
-            // 招待に入れる自分の住所
+            // Own address to put into an invite
             "addr" => match self.ep.get() {
                 Some(ep) => serde_json::to_value(net::my_addr(ep).await)?,
-                None => bail!("P2P がオフです"),
+                None => bail!("P2P is off"),
             },
             _ => bail!("unknown op: {op}"),
         })
     }
 
-    // HTTP の入り口を開く（開き直す）か閉じる。開き直すと鍵を読み直し、数えていた回数も消える。
+    // Open (reopen) or close the HTTP endpoint. Reopening rereads the keys and clears the counts.
     async fn http_op(&self, req: &Value) -> Result<Value> {
         let mut cur = self.http.lock().await;
         if let Some(r) = cur.take() {
@@ -818,7 +818,7 @@ impl Daemon {
         }
         let port = num(&req["port"]);
         if !(1.0..=65535.0).contains(&port) {
-            bail!("port が正しくありません");
+            bail!("port is not valid");
         }
         let e = http::Enabled { port: port as u16, expires: req["expires"].as_u64(), funnel: req["funnel"] == true };
         match http::start(&e).await {
@@ -832,7 +832,7 @@ impl Daemon {
         Ok(json!({ "port": e.port }))
     }
 
-    // 期限を過ぎていたら、入り口と鍵と Funnel を閉じる
+    // If it has expired, close the endpoint, the key and Funnel
     async fn http_expire(&self) {
         let mut cur = self.http.lock().await;
         let Some(r) = cur.take_if(|r| r.enabled.expired(now_ms())) else { return };
@@ -842,7 +842,7 @@ impl Daemon {
     }
 
     fn http_closed(e: &http::Enabled) {
-        // 先に書く（ファイルが消えたのを見てすぐログを読む人がいる）
+        // Write first (some readers check the log right after seeing the file disappear)
         log!("http expired");
         http::clear();
         if e.funnel {
@@ -897,17 +897,17 @@ async fn reply(c: &mut LocalStream, v: Value) {
 }
 
 fn key32(hex: &str, what: &str) -> Result<[u8; 32]> {
-    state::unhex(hex).and_then(|b| b.try_into().ok()).ok_or_else(|| anyhow!("config.json の {what} が正しくありません"))
+    state::unhex(hex).and_then(|b| b.try_into().ok()).ok_or_else(|| anyhow!("{what} in config.json is not valid"))
 }
 
 pub async fn start() -> Result<()> {
     os::prepare_daemon(&state::log_file());
-    let config = state::load_config().ok_or_else(|| anyhow!("config.json がありません。nenwa init か join を先に"))?;
+    let config = state::load_config().ok_or_else(|| anyhow!("config.json is missing. Run nenwa init or join first"))?;
     let (team_key, seed) = (key32(&config.team_key, "teamKey")?, key32(&config.seed, "seed")?);
     let sock = state::sock();
     let name = || sock.clone().into_os_string().to_fs_name::<GenericFilePath>();
 
-    // 前のデーモンが残したソケットは、つながらなければ消す。
+    // Remove a socket left by an earlier daemon if it cannot be connected to.
     if os::sock_exists(&sock) {
         if LocalStream::connect(name()?).await.is_ok() {
             return Err(AlreadyRunning.into());
@@ -936,7 +936,7 @@ pub async fn start() -> Result<()> {
         agents: agents.into_iter().filter_map(|(k, v)| Some((k, serde_json::from_value(v).ok()?))).collect(),
         last_presence: vec![],
     };
-    // network: false（install が最初に作る形）のあいだは P2P につながない。このパソコンの中だけで動く。
+    // While network is false (what install creates first), it does not connect to P2P. It works only inside this computer.
     let network = config.network != Some(false);
     let d = Arc::new(Daemon {
         person: config.person,
@@ -966,7 +966,7 @@ pub async fn start() -> Result<()> {
         net::start(&d);
     }
 
-    // 自分のセッションが変わったら仲間に知らせる。
+    // Tell peers when own sessions change.
     let dd = d.clone();
     tokio::spawn(async move {
         loop {
@@ -993,7 +993,7 @@ pub async fn start() -> Result<()> {
         }
     });
 
-    // nenwa muse で開いていた HTTP の入り口を開き直す（中で手元の通信を使うので、その待ち受けのあとで）
+    // Reopen the HTTP endpoint that nenwa muse had opened (it uses the local socket inside, so after that listener is up)
     if let Some(e) = http::load_enabled() {
         if e.expired(now_ms()) {
             Daemon::http_closed(&e);
@@ -1020,7 +1020,7 @@ pub async fn start() -> Result<()> {
     std::process::exit(0);
 }
 
-// peers.json の 1 件を、hello で名乗った名前と住所で書き直す
+// Rewrite one peers.json entry with the name and address announced in hello
 pub fn remember_peer(st: &mut St, id: &str, person: &str, machine: &str, addr: Option<net::PeerAddr>) {
     let k = st.known.entry(id.into()).or_default();
     k.person = person.into();

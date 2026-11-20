@@ -1,6 +1,6 @@
 [package]
 name = "nenwa"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Let your own coding agents (Claude Code, Codex, Cursor, OpenCode, Pi and others) message each other"
 license = "MIT"

@@ -1,4 +1,4 @@
-// 状態ファイルの場所と、デーモンへの問い合わせ（1 行 1 JSON の手元の通信）。
+// Where the state files are, and requests to the daemon (the local socket, one JSON per line).
 use anyhow::{Result, bail};
 use interprocess::local_socket::{GenericFilePath, Stream, ToFsName, prelude::*};
 use serde::{Deserialize, Serialize};
@@ -43,7 +43,7 @@ pub fn wake_dir() -> PathBuf {
     home().join("wake")
 }
 
-// 動いている実行ファイルの場所。フック、MCP、自動起動の登録に書く。
+// Where the running executable is. Written into the hook, MCP and autostart registrations.
 pub fn exe() -> PathBuf {
     os::exe_path().unwrap_or_else(|| PathBuf::from("nenwa"))
 }
@@ -55,7 +55,7 @@ pub struct Config {
     #[serde(rename = "teamKey")]
     pub team_key: String,
     pub seed: String,
-    // false のあいだは P2P につながない。古い config.json には無い
+    // While false, it does not connect to P2P. Missing in old config.json files
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<bool>,
 }
@@ -74,23 +74,23 @@ pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
 
-// JSON.stringify(x, null, 2) と同じ形（末尾の改行なし）で、権限 600 で書く
+// Write in the same form as JSON.stringify(x, null, 2) (no trailing newline), with mode 600
 pub fn write_json_private(path: &Path, v: &impl Serialize) {
     if let Ok(text) = serde_json::to_string_pretty(v) {
         let _ = os::write_private(path, &text);
     }
 }
 
-// ---- 時刻と ID ----
+// ---- Time and IDs ----
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
-// 2026-11-18T02:03:04.567Z の形（Date の toISOString と同じ）
+// The form 2026-11-18T02:03:04.567Z (same as Date's toISOString)
 pub fn iso(ms: u64) -> String {
     let (secs, milli) = (ms / 1000, ms % 1000);
     let (days, rem) = ((secs / 86400) as i64, secs % 86400);
-    // 日数から年月日（Howard Hinnant の civil_from_days）
+    // Year, month and day from a day count (Howard Hinnant's civil_from_days)
     let z = days + 719468;
     let era = z.div_euclid(146097);
     let doe = z - era * 146097;
@@ -111,7 +111,7 @@ pub fn random_bytes<const N: usize>() -> [u8; N] {
     rand::random()
 }
 
-// randomUUID と同じ形（v4）
+// Same form as randomUUID (v4)
 pub fn uuid() -> String {
     let mut b: [u8; 16] = random_bytes();
     b[6] = (b[6] & 0x0f) | 0x40;
@@ -131,7 +131,7 @@ pub fn unhex(s: &str) -> Option<Vec<u8>> {
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
 }
 
-// ---- デーモンへの問い合わせ ----
+// ---- Requests to the daemon ----
 fn once(req: &Value) -> std::io::Result<Value> {
     let name = sock().into_os_string().to_fs_name::<GenericFilePath>()?;
     let mut c = Stream::connect(name)?;
@@ -149,12 +149,12 @@ fn once(req: &Value) -> std::io::Result<Value> {
     }
 }
 
-// デーモンが動いていれば聞き、動いていなければ None（起動はしない）。
+// Ask the daemon if it is running; None if it is not (it is not started).
 pub fn try_request(req: &Value) -> Option<Value> {
     once(req).ok()
 }
 
-// デーモンが動いていなければ裏で起動してから聞く。
+// If the daemon is not running, start it in the background and then ask.
 pub fn request(req: &Value) -> Result<Value> {
     match once(req) {
         Ok(v) => return Ok(v),
@@ -162,7 +162,7 @@ pub fn request(req: &Value) -> Result<Value> {
         Err(e) => return Err(e.into()),
     }
     if load_config().is_none() {
-        bail!("まだチームがありません。nenwa init か nenwa join <招待> を先に実行してください");
+        bail!("There is no team yet. Run nenwa init or nenwa join <invite> first");
     }
     spawn_daemon()?;
     for _ in 0..50 {
@@ -171,7 +171,7 @@ pub fn request(req: &Value) -> Result<Value> {
             return Ok(v);
         }
     }
-    bail!("デーモンが起動しませんでした。{} を見てください", log_file().display())
+    bail!("The daemon did not start. See {}", log_file().display())
 }
 
 fn spawn_daemon() -> Result<()> {
@@ -184,7 +184,7 @@ fn spawn_daemon() -> Result<()> {
     Ok(())
 }
 
-// 問い合わせて、ok でなければそのエラーにする
+// Ask, and turn a response that is not ok into that error
 pub fn ask(req: Value) -> Result<Value> {
     let res = request(&req)?;
     if res["ok"] != json!(true) {
@@ -198,7 +198,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 時刻の形() {
+    fn time_format() {
         assert_eq!(iso(0), "1970-01-01T00:00:00.000Z");
         assert_eq!(iso(1_795_490_584_567), "2026-11-24T03:23:04.567Z");
         assert_eq!(uuid().len(), 36);

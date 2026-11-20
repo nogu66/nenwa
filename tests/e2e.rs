@@ -1,7 +1,7 @@
-// 1 台の上で 2 人分（alice と bob）のデーモンを立て、偽の Claude Code セッションに届くまでを確かめる。
-// テストは前のテストの状態を使うので、書いた順に 1 つずつ動かす（自前の小さなランナー。Cargo.toml の harness = false）。
-// 本物のホームには何も書かない: NENWA_HOME、HOME（Windows は USERPROFILE）、CLAUDE_CONFIG_DIR をすべて一時フォルダに向け、
-// P2P は NENWA_RELAY=disabled。偽の Claude Code セッションは、Mac と Linux は unix ソケット、Windows は名前付きパイプ。
+// Start daemons for two people (alice and bob) on one machine and check that a message reaches a fake Claude Code session.
+// Each test uses the state left by the one before, so they run one at a time in the order written (a small runner of our own. harness = false in Cargo.toml).
+// Nothing is written to the real home: NENWA_HOME, HOME (USERPROFILE on Windows) and CLAUDE_CONFIG_DIR all point at a temporary folder,
+// and P2P uses NENWA_RELAY=disabled. The fake Claude Code session is a unix socket on macOS and Linux and a named pipe on Windows.
 use interprocess::local_socket::{GenericFilePath, ListenerOptions, Stream as LocalStream, ToFsName, prelude::*};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -27,7 +27,7 @@ fn rand_hex(n: usize) -> String {
     (0..n).map(|_| format!("{:02x}", rand::random::<u8>())).collect()
 }
 
-// デーモンの手元の通信の場所（src/os と同じ決め方）
+// Where the daemon's local socket is (decided the same way as src/os)
 fn daemon_sock(h: &Home) -> String {
     if cfg!(windows) {
         use sha2::Digest;
@@ -43,7 +43,7 @@ fn local_connect(path: &str) -> std::io::Result<LocalStream> {
     LocalStream::connect(path.to_fs_name::<GenericFilePath>()?)
 }
 
-// デーモンに shutdown を頼む（自動で起動したものは pid が分からないので、こちらで止める）
+// Ask the daemon to shut down (one started automatically has an unknown pid, so stop it here)
 fn shutdown(h: &Home) {
     if let Ok(mut s) = local_connect(&daemon_sock(h)) {
         let _ = s.write_all(b"{\"op\":\"shutdown\"}\n");
@@ -111,7 +111,7 @@ struct Ctx {
     muse: Mutex<Option<Muse>>,
 }
 
-// nenwa muse で開いた HTTP の入り口
+// The HTTP endpoint opened by nenwa muse
 #[derive(Clone)]
 struct Muse {
     env: Home,
@@ -162,7 +162,7 @@ fn cli_json(h: &Home, args: &[&str]) -> Value {
     serde_json::from_str(&cli(h, args).unwrap()).unwrap()
 }
 
-// フックを起動して stdin に JSON を渡し、stdout の JSON（なければ None）を返す。
+// Run a hook, pass JSON on stdin, and return the JSON from stdout (None if there is none).
 fn hook_call(h: &Home, agent: &str, event: &str, input: Value) -> Option<Value> {
     let mut p = h.command(&["hook", agent, event]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     p.stdin.take().unwrap().write_all(input.to_string().as_bytes()).unwrap();
@@ -172,7 +172,7 @@ fn hook_call(h: &Home, agent: &str, event: &str, input: Value) -> Option<Value> 
     (!text.is_empty()).then(|| serde_json::from_str(&text).unwrap())
 }
 
-// MCP サーバーを起動して JSON-RPC を流し、返ってきた分を集める。
+// Start the MCP server, feed it JSON-RPC, and collect what comes back.
 fn mcp_call(h: &Home, requests: &[Value]) -> Vec<Value> {
     let mut p = h.command(&["mcp"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
     let mut stdin = p.stdin.take().unwrap();
@@ -195,7 +195,7 @@ fn by_id(out: &[Value], id: i64) -> Value {
     out.iter().find(|r| r["id"] == id).cloned().unwrap()
 }
 
-// f が Some を返すまで待ち、その値を返す
+// Wait until f returns Some, and return that value
 fn until<T>(mut f: impl FnMut() -> Option<T>) -> T {
     let ms = std::env::var("NENWA_TEST_WAIT").ok().and_then(|v| v.parse().ok()).unwrap_or(60_000);
     let end = Instant::now() + Duration::from_millis(ms);
@@ -212,7 +212,7 @@ fn who_has(h: &Home, text: &str) -> bool {
     cli(h, &["who"]).is_ok_and(|o| o.contains(text))
 }
 
-// 偽のセッション: 受信ソケットを開き、届いた行をためる。pid はこのテスト自身（生きているので一覧に出る）。
+// A fake session: opens a receiving socket and collects the lines that arrive. The pid is this test itself (it is alive, so it appears in the list).
 #[derive(Clone)]
 struct Session {
     got: Arc<Mutex<Vec<Value>>>,
@@ -241,7 +241,7 @@ fn fake_session(h: &Home, folder: &str, session_id: &str) -> Session {
     let g = got.clone();
     std::thread::spawn(move || {
         for mut c in listener.incoming().flatten() {
-            // 相手が閉じるまで読む（Windows のパイプは閉じるとエラーで返る）
+            // Read until the other side closes (a Windows pipe returns an error on close)
             let (mut buf, mut chunk) = (vec![], [0u8; 4096]);
             while let Ok(n @ 1..) = c.read(&mut chunk) {
                 buf.extend_from_slice(&chunk[..n]);
@@ -250,7 +250,7 @@ fn fake_session(h: &Home, folder: &str, session_id: &str) -> Session {
         }
     });
     let pid = std::process::id();
-    let s = json!({ "pid": pid, "sessionId": session_id, "cwd": format!("/work/{folder}"), "name": format!("{folder} の作業"), "status": "idle", "messagingSocketPath": sock });
+    let s = json!({ "pid": pid, "sessionId": session_id, "cwd": format!("/work/{folder}"), "name": format!("{folder} work"), "status": "idle", "messagingSocketPath": sock });
     std::fs::write(h.claude.join("sessions").join(format!("{pid}.json")), s.to_string()).unwrap();
     Session { got }
 }
@@ -261,13 +261,13 @@ fn start_daemon(h: &Home) -> Child {
     let before = ups();
     let log = std::fs::OpenOptions::new().create(true).append(true).open(&file).unwrap();
     let mut p = h.command(&["daemon"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(log).spawn().unwrap();
-    // 立ち上がる前に CLI を呼ぶと、CLI が自分でもう 1 つ起動してしまい、こちらが負けて終わる。起動のログを待つ。
+    // Calling the CLI before it is up makes the CLI start another one itself, and ours loses and exits. Wait for the startup log.
     until(|| (ups() > before || p.try_wait().is_ok_and(|s| s.is_some())).then_some(()));
-    assert!(p.try_wait().unwrap().is_none(), "デーモンが起動しませんでした: {}", std::fs::read_to_string(&file).unwrap_or_default());
+    assert!(p.try_wait().unwrap().is_none(), "the daemon did not start: {}", std::fs::read_to_string(&file).unwrap_or_default());
     p
 }
 
-// SIGTERM で止める（デーモンは仲間とのつながりを閉じてから終わる）。Windows は shutdown を頼む。
+// Stop with SIGTERM (the daemon closes its peer connections before exiting). On Windows, ask it to shut down.
 fn stop_daemon(mut p: Child, h: &Home) {
     if cfg!(windows) {
         shutdown(h);
@@ -285,7 +285,7 @@ fn stop_daemon(mut p: Child, h: &Home) {
     let _ = p.wait();
 }
 
-// 偽の webhook: 届いた要求のヘッダーと本文をためる
+// A fake webhook: collects the headers and bodies of the requests that arrive
 type Hooks = Arc<Mutex<Vec<(HashMap<String, String>, Value)>>>;
 fn webhook_server() -> (String, Hooks) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -322,10 +322,10 @@ fn before() -> Ctx {
     let root = std::env::temp_dir().join(format!("nenwa-e2e-{}-{}", std::process::id(), rand_hex(3)));
     std::fs::create_dir_all(&root).unwrap();
     let team_key = rand_hex(32);
-    // 偽の codex はこのテストの実行ファイル自身（main の先頭を見る）
+    // The fake codex is this test executable itself (see the top of main)
     let fake_codex = std::env::current_exe().unwrap();
 
-    // alice がネットワークを持ち、bob は alice の招待で入る（install は飛ばす）
+    // alice owns the network and bob joins with alice's invite (install is skipped)
     let alice = make_home(&root, &fake_codex, &team_key, "alice", true);
     let bob = make_home(&root, &fake_codex, &team_key, "bob", false);
     let mut daemons = HashMap::new();
@@ -347,14 +347,14 @@ fn after(ctx: Ctx) {
     }
 }
 
-fn 相手のセッションが一覧に出る(c: &Ctx) {
+fn peer_session_appears_in_the_list(c: &Ctx) {
     let out = until(|| cli(&c.alice, &["who"]).ok().filter(|o| o.contains("bob/api-bbbb@bob-mac")));
     assert!(re(r"bob@bob-mac\s+online").is_match(&out), "{out}");
-    assert!(out.contains("api の作業"));
+    assert!(out.contains("api work"));
 }
 
-fn ターミナルから送ると相手のセッションに枠つきで届く(c: &Ctx) {
-    let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "トークンの形式を変えた？"]);
+fn send_from_terminal_arrives_framed_in_peer_session(c: &Ctx) {
+    let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "Did you change the token format"]);
     assert_eq!(res["state"], "delivered");
     assert_eq!(res["from"], "alice/terminal@alice-mac");
     let line = until(|| c.bob_session.last());
@@ -362,14 +362,14 @@ fn ターミナルから送ると相手のセッションに枠つきで届く(c
     assert_eq!(line["message"]["role"], "user");
     let content = line["message"]["content"].as_str().unwrap();
     assert!(
-        re(r#"<nenwa-message from="alice/terminal@alice-mac" id="[0-9a-f-]+">\nトークンの形式を変えた？\n</nenwa-message>"#)
+        re(r#"<nenwa-message from="alice/terminal@alice-mac" id="[0-9a-f-]+">\nDid you change the token format\n</nenwa-message>"#)
             .is_match(content),
         "{content}"
     );
 }
 
-// /clear すると会話の ID が変わり、宛先（ID の先頭 4 文字）も変わる。古い宛先への返事と、送り主の名前がずれないこと。
-fn clearで会話のidが変わっても_古い宛先に届き_送り主は今の名前になる(c: &Ctx) {
+// /clear changes the conversation ID and so the address (first 4 characters of the ID). Replies to the old address and the sender's name must not drift.
+fn after_clear_old_address_still_delivers_and_sender_uses_current_name(c: &Ctx) {
     let file = c.bob.claude.join("sessions").join(format!("{}.json", std::process::id()));
     let before = std::fs::read_to_string(&file).unwrap();
     let mut s: Value = serde_json::from_str(&before).unwrap();
@@ -378,14 +378,14 @@ fn clearで会話のidが変わっても_古い宛先に届き_送り主は今�
     std::fs::write(&file, s.to_string()).unwrap();
 
     let n = c.bob_session.len();
-    let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "clear のあとの返事"]);
+    let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "a reply after clear"]);
     assert_eq!(res["state"], "delivered", "{res}");
     until(|| (c.bob_session.len() > n).then_some(()));
 
-    // MCP サーバーの環境変数は、起動したときの古い ID のまま
+    // The MCP server's environment variable keeps the old ID from when it started
     let mut p =
         c.bob.command(&["mcp"]).env("CLAUDE_CODE_SESSION_ID", &old_id).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().unwrap();
-    let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "alice/terminal@alice-mac", "message": "今の名前で送る" } } });
+    let req = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "alice/terminal@alice-mac", "message": "sent under the current name" } } });
     writeln!(p.stdin.take().unwrap(), "{req}").unwrap();
     let mut line = String::new();
     BufReader::new(p.stdout.take().unwrap()).read_line(&mut line).unwrap();
@@ -396,21 +396,21 @@ fn clearで会話のidが変わっても_古い宛先に届き_送り主は今�
     let _ = cli_json(&c.alice, &["inbox"]);
 }
 
-fn いないセッション宛てはno_session(c: &Ctx) {
+fn missing_session_gives_no_session(c: &Ctx) {
     let res = cli_json(&c.alice, &["send", "bob/nope@bob-mac", "hi"]);
     assert_eq!(res["state"], "no_session");
 }
 
-// ---- 受信箱（Grok Bot など Claude Code 以外の相手） ----
+// ---- Inboxes (peers other than Claude Code, such as Grok Bot) ----
 
-fn 受信箱に届くとwebhookで起こし_check_inbox相当で読める(c: &Ctx) {
+fn inbox_arrival_wakes_by_webhook_and_reads_like_check_inbox(c: &Ctx) {
     let (url, hooks) = webhook_server();
     cli(&c.alice.with(&[("NENWA_WAKE_KEY", "test-key-123")]), &["wake", "grok", &url]).unwrap();
 
-    // bob から見ても宛先として一覧に出る
+    // It appears in the list as an address from bob's side too
     until(|| who_has(&c.bob, "alice/grok@alice-mac").then_some(()));
 
-    let sent = cli_json(&c.bob, &["send", "alice/grok@alice-mac", "このテストを直して"]);
+    let sent = cli_json(&c.bob, &["send", "alice/grok@alice-mac", "fix this test"]);
     assert_eq!(sent["state"], "inbox");
     let (headers, body) = until(|| hooks.lock().unwrap().first().cloned());
     assert_eq!(headers["authorization"], "Bearer test-key-123");
@@ -418,40 +418,44 @@ fn 受信箱に届くとwebhookで起こし_check_inbox相当で読める(c: &Ct
     assert_eq!(body["mailbox"], "alice/grok@alice-mac");
     assert_eq!(body["unread"], 1);
     assert_eq!(body["from"], json!(["bob/terminal@bob-mac"]));
-    assert!(!body.to_string().contains("このテストを直して"), "本文は webhook に載せない");
+    assert!(!body.to_string().contains("fix this test"), "the message text is not put in the webhook");
 
-    // まだ読まれていない間は起こし直さない
-    cli(&c.bob, &["send", "alice/grok@alice-mac", "もう 1 件"]).unwrap();
+    // While it is still unread, it is not woken again
+    cli(&c.bob, &["send", "alice/grok@alice-mac", "one more"]).unwrap();
     sleep(500);
     assert_eq!(hooks.lock().unwrap().len(), 1);
 
     let bx = cli_json(&c.alice, &["inbox", "--as", "grok"]);
     let bodies: Vec<&str> = bx["messages"].as_array().unwrap().iter().map(|m| m["body"].as_str().unwrap()).collect();
-    assert_eq!(bodies, ["このテストを直して", "もう 1 件"]);
-    assert_eq!(cli_json(&c.alice, &["inbox", "--as", "grok"])["messages"].as_array().unwrap().len(), 0, "読んだ分は消える");
+    assert_eq!(bodies, ["fix this test", "one more"]);
+    assert_eq!(
+        cli_json(&c.alice, &["inbox", "--as", "grok"])["messages"].as_array().unwrap().len(),
+        0,
+        "messages that were read are removed"
+    );
 
-    // 読んだあとに届いたら、また起こす
-    cli(&c.bob, &["send", "alice/grok@alice-mac", "3 件目"]).unwrap();
+    // A message that arrives after the read wakes it again
+    cli(&c.bob, &["send", "alice/grok@alice-mac", "the third one"]).unwrap();
     until(|| (hooks.lock().unwrap().len() == 2).then_some(()));
     cli(&c.alice, &["inbox", "--as", "grok"]).unwrap();
 }
 
-fn 空の受信箱は_waitで届くまで待つ(c: &Ctx) {
+fn empty_inbox_waits_with_wait_until_arrival(c: &Ctx) {
     let waiting = c.alice.command(&["inbox", "--as", "grok", "--wait", "20"]).stdout(Stdio::piped()).spawn().unwrap();
     sleep(500);
-    cli(&c.bob, &["send", "alice/grok@alice-mac", "待っていた分"]).unwrap();
+    cli(&c.bob, &["send", "alice/grok@alice-mac", "the one waited for"]).unwrap();
     let out = waiting.wait_with_output().unwrap();
     let bx: Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(bx["messages"][0]["body"], "待っていた分");
+    assert_eq!(bx["messages"][0]["body"], "the one waited for");
 }
 
-fn 受信箱の名前で返事をすると_相手のセッションに届く(c: &Ctx) {
-    let sent = cli_json(&c.bob, &["send", "alice/grok@alice-mac", "質問です"]);
+fn reply_under_inbox_name_reaches_peer_session(c: &Ctx) {
+    let sent = cli_json(&c.bob, &["send", "alice/grok@alice-mac", "a question"]);
     let bx = cli_json(&c.alice, &["inbox", "--as", "grok"]);
     assert_eq!(bx["messages"][0]["id"], sent["id"]);
     let before = c.bob_session.len();
     let id = sent["id"].as_str().unwrap();
-    let res = cli_json(&c.alice, &["send", "--as", "grok", "--reply-to", id, "bob/api-bbbb@bob-mac", "答えです"]);
+    let res = cli_json(&c.alice, &["send", "--as", "grok", "--reply-to", id, "bob/api-bbbb@bob-mac", "an answer"]);
     assert_eq!(res["from"], "alice/grok@alice-mac");
     assert_eq!(res["state"], "delivered");
     let line = until(|| c.bob_session.after(before));
@@ -459,14 +463,14 @@ fn 受信箱の名前で返事をすると_相手のセッションに届く(c: 
     assert!(re(&format!(r#"from="alice/grok@alice-mac" id="[0-9a-f-]+" reply_to="{id}""#)).is_match(content), "{content}");
 }
 
-fn ターミナルからの送信への返事はterminalの受信箱に入る(c: &Ctx) {
-    let sent = cli_json(&c.alice, &["send", "--as", "grok", "bob/terminal@bob-mac", "ターミナルさんへ"]);
+fn reply_to_terminal_send_goes_to_terminal_inbox(c: &Ctx) {
+    let sent = cli_json(&c.alice, &["send", "--as", "grok", "bob/terminal@bob-mac", "to the terminal"]);
     assert_eq!(sent["state"], "inbox");
     let bx = cli_json(&c.bob, &["inbox"]);
-    assert_eq!(bx["messages"].as_array().unwrap().last().unwrap()["body"], "ターミナルさんへ");
+    assert_eq!(bx["messages"].as_array().unwrap().last().unwrap()["body"], "to the terminal");
 }
 
-fn mcp_nenwa_asを付けたときだけcheck_inboxが出る(c: &Ctx) {
+fn mcp_check_inbox_appears_only_with_nenwa_as(c: &Ctx) {
     let tools = |h: &Home| -> Vec<String> {
         let out = mcp_call(
             h,
@@ -480,7 +484,7 @@ fn mcp_nenwa_asを付けたときだけcheck_inboxが出る(c: &Ctx) {
     assert_eq!(tools(&c.alice), ["list_team", "send_message"]);
     assert_eq!(tools(&c.alice.with(&[("NENWA_AS", "grok")])), ["list_team", "send_message", "check_inbox"]);
 
-    cli(&c.bob, &["send", "alice/grok@alice-mac", "MCP で読んで"]).unwrap();
+    cli(&c.bob, &["send", "alice/grok@alice-mac", "read this over MCP"]).unwrap();
     let out = mcp_call(
         &c.alice.with(&[("NENWA_AS", "grok")]),
         &[
@@ -489,16 +493,16 @@ fn mcp_nenwa_asを付けたときだけcheck_inboxが出る(c: &Ctx) {
         ],
     );
     let text = by_id(&out, 3)["result"]["content"][0]["text"].as_str().unwrap().to_string();
-    assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\nMCP で読んで\n</nenwa-message>"#).is_match(&text), "{text}");
+    assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\nread this over MCP\n</nenwa-message>"#).is_match(&text), "{text}");
 }
 
-// ---- HTTP の入り口（nenwa muse）。Tailscale とクリップボードは使わず、鍵はファイルで受け取る ----
+// ---- HTTP endpoint (nenwa muse). Tailscale and the clipboard are not used; the key is received in a file ----
 
 fn free_port() -> u16 {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
-// nenwa muse を実行して、表示された URL と書き出された鍵を返す
+// Run nenwa muse and return the URL it printed and the key it wrote
 fn muse_on(c: &Ctx, extra: &[(&str, &str)]) -> Muse {
     let key_file = c.root.join(format!("muse-key-{}", rand_hex(3)));
     let port = free_port().to_string();
@@ -510,7 +514,7 @@ fn muse_on(c: &Ctx, extra: &[(&str, &str)]) -> Muse {
     let url = re(r"http://127\.0\.0\.1:\d+/mcp").find(&out).unwrap().as_str().to_string();
     let key = std::fs::read_to_string(&key_file).unwrap().trim().to_string();
     std::fs::remove_file(&key_file).unwrap();
-    assert!(!out.contains(&key), "鍵は画面に出さない");
+    assert!(!out.contains(&key), "the key is not shown on screen");
     assert!(out.contains("alice/muse@alice-mac"), "{out}");
     let m = Muse { env, url, key };
     *c.muse.lock().unwrap() = Some(m.clone());
@@ -525,7 +529,7 @@ fn agent() -> ureq::Agent {
     ureq::Agent::config_builder().http_status_as_error(false).timeout_global(Some(Duration::from_secs(40))).build().into()
 }
 
-// POST して (状態, 本文)。つながらなければ Err
+// POST and return (status, body). Err if it cannot connect
 fn post(url: &str, key: Option<&str>, body: &str) -> Result<(u16, String), String> {
     let mut r = agent().post(url).header("Content-Type", "application/json").header("Accept", "application/json, text/event-stream");
     if let Some(k) = key {
@@ -550,12 +554,12 @@ fn tool(m: &Muse, id: i64, name: &str, args: Value) -> String {
     v["result"]["content"][0]["text"].as_str().unwrap().to_string()
 }
 
-fn http_muse_鍵なしと違う鍵は401_鍵はハッシュだけ残す(c: &Ctx) {
-    until(|| who_has(&c.alice, "bob/api-bbbb@bob-mac").then_some(())); // 絞り込んで動かしたときのため
+fn http_muse_no_key_or_wrong_key_gives_401_and_only_the_hash_is_stored(c: &Ctx) {
+    until(|| who_has(&c.alice, "bob/api-bbbb@bob-mac").then_some(())); // for when the tests are run with a filter
     let m = muse_on(c, &[]);
     let keys = c.alice.home.join("http").join("keys.json");
     let saved = std::fs::read_to_string(&keys).unwrap();
-    assert!(!saved.contains(&m.key), "鍵そのものは残さない");
+    assert!(!saved.contains(&m.key), "the key itself is not stored");
     assert!(saved.contains("sha256"));
     #[cfg(unix)]
     {
@@ -570,7 +574,7 @@ fn http_muse_鍵なしと違う鍵は401_鍵はハッシュだけ残す(c: &Ctx)
     assert_eq!(post(&m.url.replace("/mcp", "/other"), Some(&m.key), &ping).unwrap().0, 404);
 }
 
-fn http_initializeとtools_listで3つのツール_通知は202(c: &Ctx) {
+fn http_initialize_and_tools_list_give_3_tools_and_notifications_get_202(c: &Ctx) {
     let m = muse(c);
     let init = rpc(&m, 1, "initialize", json!({ "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "test" } }));
     assert_eq!(init["result"]["serverInfo"]["name"], "nenwa");
@@ -583,37 +587,37 @@ fn http_initializeとtools_listで3つのツール_通知は202(c: &Ctx) {
     assert!(tool(&m, 3, "list_team", json!({})).contains("bob/api-bbbb@bob-mac"));
 }
 
-fn http_museからのsend_messageは_送り主がmuseで届く(c: &Ctx) {
+fn http_send_message_from_muse_arrives_with_muse_as_sender(c: &Ctx) {
     let m = muse(c);
     let before = c.bob_session.len();
-    // 別の名前を名乗ろうとしても muse のまま
-    let text = tool(&m, 4, "send_message", json!({ "to": "bob/api-bbbb@bob-mac", "message": "Muse から", "as": "grok" }));
+    // Even when it tries to use another name, it stays muse
+    let text = tool(&m, 4, "send_message", json!({ "to": "bob/api-bbbb@bob-mac", "message": "from Muse", "as": "grok" }));
     let res: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(res["from"], "alice/muse@alice-mac");
     assert_eq!(res["state"], "delivered");
     let line = until(|| c.bob_session.after(before));
     let content = line["message"]["content"].as_str().unwrap();
     assert!(
-        re(r#"<nenwa-message from="alice/muse@alice-mac" id="[0-9a-f-]+">\nMuse から\n</nenwa-message>"#).is_match(content),
+        re(r#"<nenwa-message from="alice/muse@alice-mac" id="[0-9a-f-]+">\nfrom Muse\n</nenwa-message>"#).is_match(content),
         "{content}"
     );
 }
 
-fn http_返事をcheck_inboxで読める(c: &Ctx) {
+fn http_reply_can_be_read_with_check_inbox(c: &Ctx) {
     let m = muse(c);
-    let sent = cli_json(&c.bob, &["send", "alice/muse@alice-mac", "Muse さんへの返事"]);
+    let sent = cli_json(&c.bob, &["send", "alice/muse@alice-mac", "a reply to Muse"]);
     assert_eq!(sent["state"], "inbox");
     let text = tool(&m, 5, "check_inbox", json!({ "wait_secs": 5 }));
-    assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\nMuse さんへの返事\n</nenwa-message>"#).is_match(&text), "{text}");
-    // 空のときは待って、届いたら返す（上限は 25 秒）
+    assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\na reply to Muse\n</nenwa-message>"#).is_match(&text), "{text}");
+    // When empty it waits, and returns once one arrives (the limit is 25 seconds)
     let mm = m.clone();
     let waiting = std::thread::spawn(move || tool(&mm, 6, "check_inbox", json!({ "wait_secs": 999 })));
     sleep(500);
-    cli(&c.bob, &["send", "alice/muse@alice-mac", "待っていた分"]).unwrap();
-    assert!(waiting.join().unwrap().contains("待っていた分"));
+    cli(&c.bob, &["send", "alice/muse@alice-mac", "the one waited for"]).unwrap();
+    assert!(waiting.join().unwrap().contains("the one waited for"));
 }
 
-fn http_本文が大きすぎると413_続けて送ると429(c: &Ctx) {
+fn http_oversized_body_gives_413_and_rapid_requests_give_429(c: &Ctx) {
     let m = muse(c);
     let big = json!({ "jsonrpc": "2.0", "id": 7, "method": "ping", "params": { "pad": "x".repeat(70 * 1024) } }).to_string();
     assert_eq!(post(&m.url, Some(&m.key), &big).unwrap().0, 413);
@@ -622,21 +626,21 @@ fn http_本文が大きすぎると413_続けて送ると429(c: &Ctx) {
     assert_eq!(statuses.last(), Some(&429), "{statuses:?}");
 }
 
-fn http_鍵の合わない要求が続くと503(c: &Ctx) {
+fn http_repeated_wrong_key_requests_give_503(c: &Ctx) {
     let m = muse(c);
     let ping = json!({ "jsonrpc": "2.0", "id": 9, "method": "ping" }).to_string();
     let statuses: Vec<u16> = (0..62).map(|_| post(&m.url, Some("guess"), &ping).unwrap().0).collect();
     assert_eq!(statuses.last(), Some(&503), "{statuses:?}");
-    assert_eq!(post(&m.url, Some(&m.key), &ping).unwrap().0, 503, "正しい鍵でも止まっている");
+    assert_eq!(post(&m.url, Some(&m.key), &ping).unwrap().0, 503, "blocked even with the right key");
 }
 
-fn http_offのあとは使えない_受信箱の中身は残る(c: &Ctx) {
+fn http_unusable_after_off_and_inbox_messages_are_kept(c: &Ctx) {
     let m = muse(c);
-    cli(&c.bob, &["send", "alice/muse@alice-mac", "閉じても残る"]).unwrap();
+    cli(&c.bob, &["send", "alice/muse@alice-mac", "kept after closing"]).unwrap();
     let out = cli(&m.env, &["muse", "--off"]).unwrap();
-    assert!(out.contains("閉じました"), "{out}");
+    assert!(out.contains("Closed the Muse endpoint"), "{out}");
     let ping = json!({ "jsonrpc": "2.0", "id": 10, "method": "ping" }).to_string();
-    // 待ち受けは閉じている（前のつながりが残っていれば 401）
+    // The listener is closed (401 if an earlier connection is still open)
     match post(&m.url, Some(&m.key), &ping) {
         Err(_) => {}
         Ok((status, _)) => assert_eq!(status, 401),
@@ -644,20 +648,20 @@ fn http_offのあとは使えない_受信箱の中身は残る(c: &Ctx) {
     assert!(!c.alice.home.join("http").join("keys.json").exists());
     assert!(!c.alice.home.join("http").join("enabled").exists());
     let bx = cli_json(&c.alice, &["inbox", "--as", "muse"]);
-    assert_eq!(bx["messages"][0]["body"], "閉じても残る");
+    assert_eq!(bx["messages"][0]["body"], "kept after closing");
 }
 
-fn http_期限を過ぎると閉じる(c: &Ctx) {
+fn http_closes_after_expiry(c: &Ctx) {
     let m = muse_on(c, &[("NENWA_HTTP_TTL_SECS", "3")]);
     let ping = json!({ "jsonrpc": "2.0", "id": 11, "method": "ping" }).to_string();
-    assert_eq!(post(&m.url, Some(&m.key), &ping).unwrap().0, 200, "開き直すと数えていた回数は消える");
+    assert_eq!(post(&m.url, Some(&m.key), &ping).unwrap().0, 200, "reopening clears the counts");
     until(|| post(&m.url, Some(&m.key), &ping).map_or(Some(()), |(s, _)| (s == 401).then_some(())));
     until(|| (!c.alice.home.join("http").join("enabled").exists()).then_some(()));
     assert!(!c.alice.home.join("http").join("keys.json").exists());
     assert!(std::fs::read_to_string(c.alice.home.join("test-daemon.log")).unwrap().contains("http expired"));
 }
 
-fn http_デーモンが再起動しても開き直す(c: &Ctx) {
+fn http_reopens_after_daemon_restart(c: &Ctx) {
     let m = muse_on(c, &[]);
     stop_daemon(c.daemons.lock().unwrap().remove("alice").unwrap(), &c.alice);
     c.daemons.lock().unwrap().insert("alice", start_daemon(&c.alice));
@@ -666,16 +670,16 @@ fn http_デーモンが再起動しても開き直す(c: &Ctx) {
     cli(&m.env, &["muse", "--off"]).unwrap();
     let log = std::fs::read_to_string(c.alice.home.join("test-daemon.log")).unwrap();
     assert!(log.contains("(reopened)"));
-    assert!(!log.contains(&m.key), "鍵はログにも出さない");
+    assert!(!log.contains(&m.key), "the key is not written to the log either");
     until(|| who_has(&c.bob, "alice@alice-mac  online").then_some(()));
 }
 
-// ---- フックでつながるエージェント（Cursor、Codex） ----
+// ---- Agents connected through hooks (Cursor, Codex) ----
 
 const CURSOR_ID: &str = "c0ffee00-1111-2222-3333-44445555beef";
 const CURSOR_ADDR: &str = "alice/web-beef@alice-mac";
 
-fn cursor_session_startで宛先が決まり_post_tool_useとstopで届く(c: &Ctx) {
+fn cursor_session_start_sets_address_and_post_tool_use_and_stop_deliver(c: &Ctx) {
     let start = hook_call(
         &c.alice,
         "cursor",
@@ -683,40 +687,45 @@ fn cursor_session_startで宛先が決まり_post_tool_useとstopで届く(c: &C
         json!({ "conversation_id": CURSOR_ID, "session_id": CURSOR_ID, "workspace_roots": ["/work/web"] }),
     )
     .unwrap();
-    assert!(start["additional_context"].as_str().unwrap().contains(&format!("宛先は {CURSOR_ADDR}")));
+    assert!(start["additional_context"].as_str().unwrap().contains(&format!("address is {CURSOR_ADDR}")));
     until(|| who_has(&c.bob, CURSOR_ADDR).then_some(()));
 
-    let sent = cli_json(&c.bob, &["send", CURSOR_ADDR, "画面のバグを見て"]);
+    let sent = cli_json(&c.bob, &["send", CURSOR_ADDR, "look at the screen bug"]);
     assert_eq!(sent["state"], "inbox");
-    // beforeSubmitPrompt は会話に足せないので取っておく
+    // beforeSubmitPrompt cannot add to the conversation, so it is held
     assert_eq!(
         hook_call(&c.alice, "cursor", "user-prompt-submit", json!({ "conversation_id": CURSOR_ID, "prompt": "x" })),
         Some(json!({ "continue": true }))
     );
     let post = hook_call(&c.alice, "cursor", "post-tool-use", json!({ "conversation_id": CURSOR_ID, "tool_name": "Shell" })).unwrap();
     assert!(
-        re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\n画面のバグを見て"#).is_match(post["additional_context"].as_str().unwrap())
+        re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\nlook at the screen bug"#)
+            .is_match(post["additional_context"].as_str().unwrap())
     );
-    assert_eq!(hook_call(&c.alice, "cursor", "post-tool-use", json!({ "conversation_id": CURSOR_ID })), None, "同じものは二度出さない");
+    assert_eq!(
+        hook_call(&c.alice, "cursor", "post-tool-use", json!({ "conversation_id": CURSOR_ID })),
+        None,
+        "the same one is not given twice"
+    );
 
-    cli(&c.bob, &["send", CURSOR_ADDR, "終わったら返事を"]).unwrap();
+    cli(&c.bob, &["send", CURSOR_ADDR, "reply when you finish"]).unwrap();
     let stop =
         hook_call(&c.alice, "cursor", "stop", json!({ "conversation_id": CURSOR_ID, "status": "completed", "loop_count": 0 })).unwrap();
-    assert!(stop["followup_message"].as_str().unwrap().contains("終わったら返事を"));
+    assert!(stop["followup_message"].as_str().unwrap().contains("reply when you finish"));
     assert_eq!(
         hook_call(&c.alice, "cursor", "stop", json!({ "conversation_id": CURSOR_ID, "status": "completed", "loop_count": 1 })),
         None
     );
 }
 
-fn cursor_mcp_agent_cursorから送ると_そのセッションが送り主になる(c: &Ctx) {
-    hook_call(&c.alice, "cursor", "post-tool-use", json!({ "conversation_id": CURSOR_ID })); // 作業中にする
+fn cursor_mcp_agent_cursor_send_makes_that_session_the_sender(c: &Ctx) {
+    hook_call(&c.alice, "cursor", "post-tool-use", json!({ "conversation_id": CURSOR_ID })); // make it working
     let before = c.bob_session.len();
     let out = mcp_call(
         &c.alice.with(&[("NENWA_AGENT", "cursor")]),
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "bob/api-bbbb@bob-mac", "message": "Cursor から" } } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "bob/api-bbbb@bob-mac", "message": "from Cursor" } } }),
         ],
     );
     let res: Value = serde_json::from_str(by_id(&out, 2)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -729,7 +738,7 @@ fn cursor_mcp_agent_cursorから送ると_そのセッションが送り主に�
 const CODEX_ID: &str = "019a2b3c-0000-7000-8000-00000000c0de";
 const CODEX_ADDR: &str = "alice/api-c0de@alice-mac";
 
-fn codex_codex_queueで会話に入れる_失敗したらフックで差し込む(c: &Ctx) {
+fn codex_queue_puts_into_conversation_and_hooks_inject_on_failure(c: &Ctx) {
     let start = hook_call(
         &c.alice,
         "codex",
@@ -738,28 +747,28 @@ fn codex_codex_queueで会話に入れる_失敗したらフックで差し込�
     )
     .unwrap();
     assert_eq!(start["hookSpecificOutput"]["hookEventName"], "SessionStart");
-    assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains(&format!("宛先は {CODEX_ADDR}")));
+    assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains(&format!("address is {CODEX_ADDR}")));
 
-    let sent = cli_json(&c.bob, &["send", CODEX_ADDR, "API の型を教えて"]);
+    let sent = cli_json(&c.bob, &["send", CODEX_ADDR, "tell me the API type"]);
     assert_eq!(sent["state"], "delivered");
     let logged = std::fs::read_to_string(c.alice.get("FAKE_CODEX_LOG")).unwrap();
     let lines: Vec<&str> = logged.split('\n').collect();
     assert_eq!(lines[..4], ["queue", "--thread", CODEX_ID, "--message"]);
-    assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\nAPI の型を教えて"#).is_match(&lines[4..].join("\n")));
+    assert!(re(r#"<nenwa-message from="bob/terminal@bob-mac"[^>]*>\ntell me the API type"#).is_match(&lines[4..].join("\n")));
 
-    // codex queue が失敗したとき
+    // When codex queue fails
     let fail = c.alice.get("FAKE_CODEX_FAIL");
     std::fs::write(&fail, "").unwrap();
-    assert_eq!(cli_json(&c.bob, &["send", CODEX_ADDR, "フックで受けて"])["state"], "inbox");
+    assert_eq!(cli_json(&c.bob, &["send", CODEX_ADDR, "take this through the hook"])["state"], "inbox");
     let post = hook_call(&c.alice, "codex", "post-tool-use", json!({ "session_id": CODEX_ID, "hook_event_name": "PostToolUse" })).unwrap();
     assert_eq!(post["hookSpecificOutput"]["hookEventName"], "PostToolUse");
-    assert!(post["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("フックで受けて"));
-    cli(&c.bob, &["send", CODEX_ADDR, "止まる前に読んで"]).unwrap();
+    assert!(post["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("take this through the hook"));
+    cli(&c.bob, &["send", CODEX_ADDR, "read this before stopping"]).unwrap();
     let stop =
         hook_call(&c.alice, "codex", "stop", json!({ "session_id": CODEX_ID, "hook_event_name": "Stop", "stop_hook_active": false }))
             .unwrap();
     assert_eq!(stop["decision"], "block");
-    assert!(stop["reason"].as_str().unwrap().contains("止まる前に読んで"));
+    assert!(stop["reason"].as_str().unwrap().contains("read this before stopping"));
     assert_eq!(hook_call(&c.alice, "codex", "stop", json!({ "session_id": CODEX_ID, "stop_hook_active": true })), None);
     std::fs::remove_file(&fail).unwrap();
 
@@ -767,7 +776,7 @@ fn codex_codex_queueで会話に入れる_失敗したらフックで差し込�
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(CODEX_ADDR)));
 }
 
-// 偽の Codex 本体（sh）。フックと MCP サーバーをその子として動かし、stdin が閉じたら終わる。
+// A fake Codex process (sh). Runs the hook and the MCP server as its children, and exits when stdin closes.
 struct FakeAgent {
     child: std::process::Child,
     lines: std::io::Lines<BufReader<std::process::ChildStdout>>,
@@ -801,7 +810,7 @@ read _"#;
         assert_eq!(lines.next().unwrap().unwrap(), "ready");
         FakeAgent { child, lines, out }
     }
-    // MCP から 1 通送り、デーモンが決めた送り主を返す
+    // Send one message through MCP and return the sender the daemon decided
     fn send(&mut self) -> String {
         writeln!(self.child.stdin.as_mut().unwrap()).unwrap();
         assert_eq!(self.lines.next().unwrap().unwrap(), "sent");
@@ -816,77 +825,75 @@ read _"#;
     }
 }
 
-fn 同じフォルダの会話が2つあっても_送り主は呼んだ本体で決まり_本体が消えた会話は一覧から外れる(
-    c: &Ctx,
-) {
+fn with_two_conversations_in_one_folder_sender_is_the_calling_process_and_dead_ones_leave_the_list(c: &Ctx) {
     if cfg!(windows) {
-        return; // sh を使うので unix だけ
+        return; // uses sh, so unix only
     }
     let (first, second) = ("alice/web-aaa1@alice-mac", "alice/web-aaa2@alice-mac");
     let mut a = FakeAgent::start(c, "019a2b3c-0000-7000-8000-00000000aaa1", "bob/api-bbbb@bob-mac");
-    // あとから開いた会話。フォルダも状態も同じなので、本体を見なければこちらが選ばれる。
+    // A conversation opened later. The folder and status are the same, so without looking at the agent process this one would be picked.
     let b = FakeAgent::start(c, "019a2b3c-0000-7000-8000-00000000aaa2", "bob/api-bbbb@bob-mac");
     assert_eq!(a.send(), first);
 
     a.close();
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(first) && o.contains(second)));
-    assert_eq!(cli_json(&c.bob, &["send", first, "もういない"])["state"], "no_session");
+    assert_eq!(cli_json(&c.bob, &["send", first, "already gone"])["state"], "no_session");
     b.close();
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(second)));
 }
 
-// OpenCode: プラグインが会話を知らせ、デーモンは OpenCode の手元のサーバーに送って会話に入れる。
-fn opencode_手元のサーバーに送って会話に入れる_届かなければプラグインのフックで渡す(c: &Ctx) {
+// OpenCode: the plugin reports the conversation, and the daemon sends to OpenCode's local server to put the message into the conversation.
+fn opencode_sends_to_local_server_and_falls_back_to_plugin_hooks(c: &Ctx) {
     let (url, got) = webhook_server();
     let base = url.trim_end_matches("/hook").to_string();
     let addr = "alice/site-9z8y@alice-mac";
     let input = json!({ "session_id": "ses_4f0a1b2c3d9Z8Y", "cwd": "/work/my site/site", "server_url": base });
-    // 始まったときは何も足さない（足すと、それだけで応答が始まる）
+    // Nothing is added at start (adding would start a response by itself)
     assert_eq!(hook_call(&c.alice, "opencode", "session-start", input.clone()), None);
     until(|| who_has(&c.bob, addr).then_some(()));
 
     let before = got.lock().unwrap().len();
-    assert_eq!(cli_json(&c.bob, &["send", addr, "待機中でも届く"])["state"], "delivered");
+    assert_eq!(cli_json(&c.bob, &["send", addr, "arrives even when idle"])["state"], "delivered");
     let (headers, body) = got.lock().unwrap()[before].clone();
     assert_eq!(headers[":path"], "/session/ses_4f0a1b2c3d9Z8Y/prompt_async?directory=/work/my%20site/site");
     assert_eq!(body["parts"][0]["type"], "text");
-    assert!(body["parts"][0]["text"].as_str().unwrap().contains("待機中でも届く"));
+    assert!(body["parts"][0]["text"].as_str().unwrap().contains("arrives even when idle"));
 
-    // よそのサーバーには送らない。届かないので受信箱に置き、プラグインのフックで渡す。
+    // Never send to a server elsewhere. It cannot be delivered, so it goes to the inbox and the plugin's hook hands it over.
     let mut away = input.clone();
     away["session_id"] = json!("ses_0000000000aw4y");
     away["server_url"] = json!("http://example.com:80");
     hook_call(&c.alice, "opencode", "user-prompt-submit", away.clone());
     let n = got.lock().unwrap().len();
-    assert_eq!(cli_json(&c.bob, &["send", "alice/site-aw4y@alice-mac", "フックで受けて"])["state"], "inbox");
+    assert_eq!(cli_json(&c.bob, &["send", "alice/site-aw4y@alice-mac", "take this through the hook"])["state"], "inbox");
     assert_eq!(got.lock().unwrap().len(), n);
-    assert_eq!(hook_call(&c.alice, "opencode", "user-prompt-submit", away.clone()), None, "入力のときは取り出さない");
+    assert_eq!(hook_call(&c.alice, "opencode", "user-prompt-submit", away.clone()), None, "not taken out at input time");
     let tool = hook_call(&c.alice, "opencode", "post-tool-use", away.clone()).unwrap();
-    assert!(tool["text"].as_str().unwrap().contains("フックで受けて"));
-    cli(&c.bob, &["send", "alice/site-aw4y@alice-mac", "止まる前に"]).unwrap();
-    assert!(hook_call(&c.alice, "opencode", "stop", away.clone()).unwrap()["text"].as_str().unwrap().contains("止まる前に"));
+    assert!(tool["text"].as_str().unwrap().contains("take this through the hook"));
+    cli(&c.bob, &["send", "alice/site-aw4y@alice-mac", "before stopping"]).unwrap();
+    assert!(hook_call(&c.alice, "opencode", "stop", away.clone()).unwrap()["text"].as_str().unwrap().contains("before stopping"));
     assert_eq!(hook_call(&c.alice, "opencode", "stop", away.clone()), None);
 
-    // サーバーのない TUI では、プラグインが待ち受けで受け取る（待機中でも、届いたらすぐ返る）
+    // In a TUI without a server, the plugin receives through its wait call (even when idle, it returns as soon as one arrives)
     let (h, waiting_input) = (c.alice.clone(), away.clone());
     let waiter = std::thread::spawn(move || hook_call(&h, "opencode", "wait", waiting_input));
     sleep(700);
     let sent = Instant::now();
-    cli(&c.bob, &["send", "alice/site-aw4y@alice-mac", "待っている間に"]).unwrap();
-    assert!(waiter.join().unwrap().unwrap()["text"].as_str().unwrap().contains("待っている間に"));
-    assert!(sent.elapsed() < Duration::from_secs(5), "届いたらすぐ返る");
+    cli(&c.bob, &["send", "alice/site-aw4y@alice-mac", "while waiting"]).unwrap();
+    assert!(waiter.join().unwrap().unwrap()["text"].as_str().unwrap().contains("while waiting"));
+    assert!(sent.elapsed() < Duration::from_secs(5), "returns as soon as one arrives");
 
     hook_call(&c.alice, "opencode", "session-end", away);
     hook_call(&c.alice, "opencode", "session-end", input);
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains("alice/site-")));
 }
 
-// Pi: 拡張が「wait」で届くのを待つ。待っている間に届いたら、すぐ返る。
-fn pi_拡張の待ち受けに_届いたらすぐ渡す(c: &Ctx) {
+// Pi: the extension waits for arrivals with "wait". If one arrives while waiting, it returns at once.
+fn pi_extension_wait_gets_arrivals_at_once(c: &Ctx) {
     let addr = "alice/tool-91ab@alice-mac";
     let input = json!({ "session_id": "0c1d2e3f-4a5b-4c6d-8e7f-0000000091ab", "cwd": "/work/tool" });
     let start = hook_call(&c.alice, "pi", "session-start", input.clone()).unwrap();
-    assert!(start["text"].as_str().unwrap().contains(&format!("宛先は {addr}")));
+    assert!(start["text"].as_str().unwrap().contains(&format!("address is {addr}")));
     hook_call(&c.alice, "pi", "user-prompt-submit", input.clone());
     until(|| who_has(&c.bob, &format!("{addr}  [busy]")).then_some(()));
 
@@ -894,50 +901,50 @@ fn pi_拡張の待ち受けに_届いたらすぐ渡す(c: &Ctx) {
     let waiting_input = input.clone();
     let waiter = std::thread::spawn(move || (Instant::now(), hook_call(&h, "pi", "wait", waiting_input)));
     sleep(700);
-    assert!(who_has(&c.bob, &format!("{addr}  [busy]")), "待ち受けは状態を変えない");
+    assert!(who_has(&c.bob, &format!("{addr}  [busy]")), "a wait call does not change the status");
     let sent = Instant::now();
-    cli(&c.bob, &["send", addr, "待っている間に"]).unwrap();
+    cli(&c.bob, &["send", addr, "while waiting"]).unwrap();
     let (_, got) = waiter.join().unwrap();
-    assert!(got.unwrap()["text"].as_str().unwrap().contains("待っている間に"));
-    assert!(sent.elapsed() < Duration::from_secs(5), "届いたらすぐ返る");
+    assert!(got.unwrap()["text"].as_str().unwrap().contains("while waiting"));
+    assert!(sent.elapsed() < Duration::from_secs(5), "returns as soon as one arrives");
 
     assert_eq!(hook_call(&c.alice, "pi", "stop", input.clone()), None);
     hook_call(&c.alice, "pi", "session-end", input);
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(addr)));
 }
 
-// Antigravity CLI: 会話の ID は conversationId。モデルを呼ぶ前に injectSteps で足し、Stop は continue で続けさせる。
-fn antigravity_cli_モデルを呼ぶ前と応答の終わりで届く(c: &Ctx) {
+// Antigravity CLI: the conversation ID is conversationId. Added with injectSteps before the model is called, and Stop makes it continue with continue.
+fn antigravity_cli_delivers_before_model_call_and_at_end_of_response(c: &Ctx) {
     let addr = "alice/lab-7e57@alice-mac";
     let input = json!({ "conversationId": "b1b2b3b4-0000-4000-8000-000000007e57", "workspacePaths": ["/work/lab"], "hookEventName": "SessionStart" });
     let start = hook_call(&c.alice, "antigravity", "session-start", input.clone()).unwrap();
-    assert!(start["injectSteps"][0]["ephemeralMessage"].as_str().unwrap().contains(&format!("宛先は {addr}")));
-    assert_eq!(cli_json(&c.bob, &["send", addr, "モデルの前に"])["state"], "inbox");
+    assert!(start["injectSteps"][0]["ephemeralMessage"].as_str().unwrap().contains(&format!("address is {addr}")));
+    assert_eq!(cli_json(&c.bob, &["send", addr, "before the model"])["state"], "inbox");
     let pre = hook_call(&c.alice, "antigravity", "post-tool-use", input.clone()).unwrap();
-    assert!(pre["injectSteps"][0]["ephemeralMessage"].as_str().unwrap().contains("モデルの前に"));
+    assert!(pre["injectSteps"][0]["ephemeralMessage"].as_str().unwrap().contains("before the model"));
     assert_eq!(hook_call(&c.alice, "antigravity", "post-tool-use", input.clone()), None);
-    cli(&c.bob, &["send", addr, "止まる前に"]).unwrap();
+    cli(&c.bob, &["send", addr, "before stopping"]).unwrap();
     let stop = hook_call(&c.alice, "antigravity", "stop", input.clone()).unwrap();
     assert_eq!(stop["decision"], "continue");
-    assert!(stop["reason"].as_str().unwrap().contains("止まる前に"));
+    assert!(stop["reason"].as_str().unwrap().contains("before stopping"));
     hook_call(&c.alice, "antigravity", "session-end", input);
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(addr)));
 }
 
-// Copilot CLI: 会話の ID は sessionId。文脈は additionalContext をいちばん上に置く。入力のときは足せない。
-fn copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く(c: &Ctx) {
+// Copilot CLI: the conversation ID is sessionId. Context goes in additionalContext at the top level. Nothing can be added at input time.
+fn copilot_cli_hooks_set_address_and_deliver_after_tools_and_at_end_of_response(c: &Ctx) {
     let addr = "alice/app-c0p1@alice-mac";
     let input = json!({ "sessionId": "5a6b7c8d-0000-4000-8000-00000000c0p1", "cwd": "/work/app", "timestamp": 1795000000000u64 });
     let start = hook_call(&c.alice, "copilot", "session-start", input.clone()).unwrap();
-    assert!(start["additionalContext"].as_str().unwrap().contains(&format!("宛先は {addr}")));
-    assert_eq!(cli_json(&c.bob, &["send", addr, "ツールのあとに"])["state"], "inbox");
+    assert!(start["additionalContext"].as_str().unwrap().contains(&format!("address is {addr}")));
+    assert_eq!(cli_json(&c.bob, &["send", addr, "after the tool"])["state"], "inbox");
     assert_eq!(hook_call(&c.alice, "copilot", "user-prompt-submit", input.clone()), None);
     let tool = hook_call(&c.alice, "copilot", "post-tool-use", input.clone()).unwrap();
-    assert!(tool["additionalContext"].as_str().unwrap().contains("ツールのあとに"));
-    cli(&c.bob, &["send", addr, "止まる前に"]).unwrap();
+    assert!(tool["additionalContext"].as_str().unwrap().contains("after the tool"));
+    cli(&c.bob, &["send", addr, "before stopping"]).unwrap();
     let stop = hook_call(&c.alice, "copilot", "stop", input.clone()).unwrap();
     assert_eq!(stop["decision"], "block");
-    assert!(stop["reason"].as_str().unwrap().contains("止まる前に"));
+    assert!(stop["reason"].as_str().unwrap().contains("before stopping"));
     assert_eq!(hook_call(&c.alice, "copilot", "stop", input.clone()), None);
     hook_call(&c.alice, "copilot", "session-end", input);
     until(|| cli(&c.bob, &["who"]).ok().filter(|o| !o.contains(addr)));
@@ -946,35 +953,35 @@ fn copilot_cli_フックで宛先が決まり_ツールのあとと応答の終�
 const GEMINI_ID: &str = "7d1e2f3a-aaaa-bbbb-cccc-00000000f00d";
 const GEMINI_ADDR: &str = "alice/docs-f00d@alice-mac";
 
-// Gemini CLI はイベントの名前が違い、応答の終わりで続けさせる言葉が deny。Qwen Code は Codex と同じ形。
-fn gemini_cliとqwen_code_フックで宛先が決まり_それぞれの形で届く(c: &Ctx) {
+// Gemini CLI has different event names, and the word that makes it continue at the end of a response is deny. Qwen Code has the same form as Codex.
+fn gemini_cli_and_qwen_code_hooks_set_address_and_deliver_in_each_form(c: &Ctx) {
     let input = |event: &str| json!({ "session_id": GEMINI_ID, "cwd": "/work/docs", "hook_event_name": event });
     let start = hook_call(&c.alice, "gemini", "session-start", input("SessionStart")).unwrap();
     assert_eq!(start["hookSpecificOutput"]["hookEventName"], "SessionStart");
-    assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains(&format!("宛先は {GEMINI_ADDR}")));
+    assert!(start["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains(&format!("address is {GEMINI_ADDR}")));
     assert!(who_has(&c.bob, GEMINI_ADDR) || until(|| who_has(&c.bob, GEMINI_ADDR).then_some(true)));
 
-    // 外から会話に入れる口はないので、受信箱に置いて次のフックで渡す
-    assert_eq!(cli_json(&c.bob, &["send", GEMINI_ADDR, "入力の前に"])["state"], "inbox");
+    // There is no way into the conversation from outside, so it goes to the inbox and the next hook hands it over
+    assert_eq!(cli_json(&c.bob, &["send", GEMINI_ADDR, "before the input"])["state"], "inbox");
     let prompt = hook_call(&c.alice, "gemini", "user-prompt-submit", input("BeforeAgent")).unwrap();
     assert_eq!(prompt["hookSpecificOutput"]["hookEventName"], "BeforeAgent");
-    assert!(prompt["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("入力の前に"));
-    cli(&c.bob, &["send", GEMINI_ADDR, "ツールのあとに"]).unwrap();
+    assert!(prompt["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("before the input"));
+    cli(&c.bob, &["send", GEMINI_ADDR, "after the tool"]).unwrap();
     let tool = hook_call(&c.alice, "gemini", "post-tool-use", input("AfterTool")).unwrap();
     assert_eq!(tool["hookSpecificOutput"]["hookEventName"], "AfterTool");
-    assert!(tool["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("ツールのあとに"));
-    cli(&c.bob, &["send", GEMINI_ADDR, "止まる前に"]).unwrap();
+    assert!(tool["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("after the tool"));
+    cli(&c.bob, &["send", GEMINI_ADDR, "before stopping"]).unwrap();
     let stop = hook_call(&c.alice, "gemini", "stop", input("AfterAgent")).unwrap();
     assert_eq!(stop["decision"], "deny");
-    assert!(stop["reason"].as_str().unwrap().contains("止まる前に"));
+    assert!(stop["reason"].as_str().unwrap().contains("before stopping"));
     assert_eq!(hook_call(&c.alice, "gemini", "stop", input("AfterAgent")), None);
 
-    // MCP（--agent gemini）から送ると、その会話が送り主になる
+    // Sending through MCP (--agent gemini) makes that conversation the sender
     let out = mcp_call(
         &c.alice.with(&[("NENWA_AGENT", "gemini")]),
         &[
             json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {} }),
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "bob/api-bbbb@bob-mac", "message": "Gemini から" } } }),
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "send_message", "arguments": { "to": "bob/api-bbbb@bob-mac", "message": "from Gemini" } } }),
         ],
     );
     let res: Value = serde_json::from_str(by_id(&out, 2)["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
@@ -985,21 +992,21 @@ fn gemini_cliとqwen_code_フックで宛先が決まり_それぞれの形で�
     let qwen = "alice/docs-beef@alice-mac";
     let input = json!({ "session_id": "11112222-3333-4444-5555-66667777beef", "cwd": "/work/docs" });
     hook_call(&c.alice, "qwen", "session-start", input.clone()).unwrap();
-    cli(&c.bob, &["send", qwen, "Qwen へ"]).unwrap();
+    cli(&c.bob, &["send", qwen, "to Qwen"]).unwrap();
     let post = hook_call(&c.alice, "qwen", "post-tool-use", input.clone()).unwrap();
     assert_eq!(post["hookSpecificOutput"]["hookEventName"], "PostToolUse");
-    assert!(post["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("Qwen へ"));
-    cli(&c.bob, &["send", qwen, "止まる前に"]).unwrap();
+    assert!(post["hookSpecificOutput"]["additionalContext"].as_str().unwrap().contains("to Qwen"));
+    cli(&c.bob, &["send", qwen, "before stopping"]).unwrap();
     assert_eq!(hook_call(&c.alice, "qwen", "stop", input.clone()).unwrap()["decision"], "block");
     hook_call(&c.alice, "qwen", "session-end", input);
 }
 
-fn フック_デーモンがなくても何も出さずに正常終了する(c: &Ctx) {
+fn hook_exits_cleanly_without_output_when_no_daemon(c: &Ctx) {
     let lonely = c.alice.with(&[("NENWA_HOME", &c.root.join("nobody").display().to_string())]);
     assert_eq!(hook_call(&lonely, "codex", "post-tool-use", json!({ "session_id": CODEX_ID })), None);
 }
 
-fn setup_codexとcursorにほかの設定を残したまま足し_removeで元に戻す(c: &Ctx) {
+fn setup_adds_while_keeping_other_settings_and_remove_restores(c: &Ctx) {
     let codex = c.root.join("codex-home");
     let cursor = c.root.join("cursor-home");
     std::fs::create_dir_all(&codex).unwrap();
@@ -1009,7 +1016,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     let other_hook = json!({ "hooks": [{ "type": "command", "command": "echo other" }], "matcher": "*" });
     std::fs::write(codex.join("hooks.json"), json!({ "hooks": { "PostToolUse": [other_hook] } }).to_string()).unwrap();
     std::fs::write(cursor.join("mcp.json"), json!({ "mcpServers": { "other": { "command": "other" } } }).to_string()).unwrap();
-    // 古い場所（フォルダを移す前や TS 版）を指す nenwa のフックは、置き換わって重ならない
+    // nenwa hooks pointing at an old location (before the folder moved, or the TS version) are replaced and do not pile up
     let stale_ts = json!({ "command": "'/usr/bin/node' '/old/place/src/cli.mjs' hook cursor stop" });
     let stale = json!({ "command": "'/old/bin/nenwa' hook cursor stop" });
     std::fs::write(
@@ -1017,7 +1024,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
         json!({ "version": 1, "hooks": { "stop": [{ "command": "echo other" }, stale_ts, stale] } }).to_string(),
     )
     .unwrap();
-    // Gemini CLI: ほかの設定とフックを残す。Qwen Code: 読めない設定（コメント入り）には触らない。
+    // Gemini CLI: keeps other settings and hooks. Qwen Code: a config that cannot be parsed (comments) is not touched.
     let (gemini, qwen) = (c.root.join("gemini-home"), c.root.join("qwen-home"));
     std::fs::create_dir_all(&gemini).unwrap();
     std::fs::create_dir_all(&qwen).unwrap();
@@ -1027,7 +1034,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
         "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "echo other" }] }] }
     });
     std::fs::write(gemini.join("settings.json"), gemini_before.to_string()).unwrap();
-    let qwen_text = "{\n  // コメント\n  \"theme\": \"Default\"\n}\n";
+    let qwen_text = "{\n  // comment\n  \"theme\": \"Default\"\n}\n";
     std::fs::write(qwen.join("settings.json"), qwen_text).unwrap();
     let opencode = c.root.join("opencode-home");
     std::fs::create_dir_all(opencode.join("plugins")).unwrap();
@@ -1058,7 +1065,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     let read = |p: PathBuf| -> Value { serde_json::from_str(&std::fs::read_to_string(p).unwrap()).unwrap() };
 
     cli(&h, &["setup"]).unwrap();
-    cli(&h, &["setup"]).unwrap(); // 2 回やっても重ならない
+    cli(&h, &["setup"]).unwrap(); // running it twice does not duplicate anything
     let t = std::fs::read_to_string(codex.join("config.toml")).unwrap();
     assert_eq!(t.matches("[mcp_servers.nenwa]").count(), 1);
     assert!(re(r#"command = ".*nenwa(\.exe)?"\nargs = \["mcp","--agent","codex"\]"#).is_match(&t), "{t}");
@@ -1094,7 +1101,7 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert_eq!(o["mcp"]["nenwa"]["type"], "local");
     assert_eq!(o["mcp"]["nenwa"]["command"].as_array().unwrap()[1..], [json!("mcp"), json!("--agent"), json!("opencode")]);
     let plugin = std::fs::read_to_string(opencode.join("plugins").join("nenwa.js")).unwrap();
-    assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&plugin), "実行ファイルの場所が入る");
+    assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&plugin), "the executable's location is filled in");
     assert!(!plugin.contains("__NENWA_EXE__"));
     let ext = std::fs::read_to_string(pi.join("extensions").join("nenwa.ts")).unwrap();
     assert!(re(r#"const NENWA = ".*nenwa(\.exe)?";"#).is_match(&ext));
@@ -1120,9 +1127,9 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert!(re(r"^& '.*nenwa(\.exe)?' hook copilot stop$").is_match(ch["hooks"]["agentStop"][0]["powershell"].as_str().unwrap()));
 
     let doc = cli(&h, &["doctor"]).unwrap();
-    assert!(re(r"Codex\s+\S+\s+済み").is_match(&doc), "{doc}");
-    assert!(re(r"Qwen Code\s+\S+\s+まだ").is_match(&doc), "読めなかった設定は未登録のまま: {doc}");
-    assert!(doc.contains("デーモン: 動いています"));
+    assert!(re(r"Codex\s+\S+\s+done").is_match(&doc), "{doc}");
+    assert!(re(r"Qwen Code\s+\S+\s+not yet").is_match(&doc), "a config that could not be parsed stays unregistered: {doc}");
+    assert!(doc.contains("Daemon: running"));
 
     cli(&h, &["setup", "--remove"]).unwrap();
     assert_eq!(read(gemini.join("settings.json")), gemini_before);
@@ -1141,19 +1148,19 @@ fn setup_codexとcursorにほかの設定を残したまま足し_removeで元�
     assert_eq!(read(cursor.join("hooks.json"))["hooks"], json!({ "stop": [{ "command": "echo other" }] }));
 }
 
-fn 相手がオフラインならoutboxに置き_戻ったら届く(c: &Ctx) {
+fn offline_peer_goes_to_outbox_and_delivers_on_return(c: &Ctx) {
     stop_daemon(c.daemons.lock().unwrap().remove("bob").unwrap(), &c.bob);
     until(|| who_has(&c.alice, "offline").then_some(()));
     let before = c.bob_session.len();
-    let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "戻ったら読んで"]);
+    let res = cli_json(&c.alice, &["send", "bob/api-bbbb@bob-mac", "read this when you are back"]);
     assert_eq!(res["state"], "queued");
     c.daemons.lock().unwrap().insert("bob", start_daemon(&c.bob));
     let line = until(|| c.bob_session.after(before));
-    assert!(line["message"]["content"].as_str().unwrap().contains("戻ったら読んで"));
-    until(|| cli(&c.alice, &["who"]).ok().filter(|o| !o.contains("未送信")));
+    assert!(line["message"]["content"].as_str().unwrap().contains("read this when you are back"));
+    until(|| cli(&c.alice, &["who"]).ok().filter(|o| !o.contains("Unsent")));
 }
 
-fn p2pオフ_install_が最初に作る形_でも_このパソコンの中では届く_inviteでオンになる(c: &Ctx) {
+fn p2p_off_still_delivers_inside_this_computer_and_invite_turns_it_on(c: &Ctx) {
     let carol = c.make_home("carol", true);
     let cfg_file = carol.home.join("config.json");
     let mut cfg: Value = serde_json::from_str(&std::fs::read_to_string(&cfg_file).unwrap()).unwrap();
@@ -1161,13 +1168,13 @@ fn p2pオフ_install_が最初に作る形_でも_このパソコンの中では
     std::fs::write(&cfg_file, cfg.to_string()).unwrap();
     let session = fake_session(&carol, "notes", "cccc2222-0000-0000-0000-000000000000");
     let run = || {
-        let out = cli(&carol, &["who"]).unwrap(); // デーモンは自動で起動する
-        assert!(out.contains("このパソコンの中だけ"), "{out}");
+        let out = cli(&carol, &["who"]).unwrap(); // the daemon starts automatically
+        assert!(out.contains("inside this computer only"), "{out}");
         assert!(out.contains("carol/notes-cccc@carol-mac"));
         assert!(std::fs::read_to_string(carol.home.join("daemon.log")).unwrap().contains("local only"));
-        let res = cli_json(&carol, &["send", "carol/notes-cccc@carol-mac", "中だけで届く"]);
+        let res = cli_json(&carol, &["send", "carol/notes-cccc@carol-mac", "delivered inside only"]);
         assert_eq!(res["state"], "delivered");
-        assert!(until(|| session.last())["message"]["content"].as_str().unwrap().contains("中だけで届く"));
+        assert!(until(|| session.last())["message"]["content"].as_str().unwrap().contains("delivered inside only"));
 
         let inv = cli(&carol, &["invite"]).unwrap();
         assert!(
@@ -1181,17 +1188,17 @@ fn p2pオフ_install_が最初に作る形_でも_このパソコンの中では
         );
         let cfg: Value = serde_json::from_str(&std::fs::read_to_string(&cfg_file).unwrap()).unwrap();
         assert_eq!(cfg["network"], true);
-        until(|| cli(&carol, &["who"]).ok().filter(|o| !o.contains("このパソコンの中だけ")));
+        until(|| cli(&carol, &["who"]).ok().filter(|o| !o.contains("inside this computer only")));
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
-    // 自動で起動したデーモンを止める
+    // Stop the daemon that was started automatically
     shutdown(&carol);
     if let Err(e) = result {
         std::panic::resume_unwind(e);
     }
 }
 
-// 偽の codex として呼ばれたとき: queue に渡された引数を記録する。codex-fail があれば失敗する。
+// When called as the fake codex: record the arguments passed to queue. Fail if codex-fail exists.
 fn fake_codex(log: &str) {
     if std::env::var("FAKE_CODEX_FAIL").is_ok_and(|f| Path::new(&f).exists()) {
         eprintln!("no rollout found");
@@ -1209,60 +1216,84 @@ fn main() {
         return fake_codex(&log);
     }
     let tests: Vec<Test> = vec![
-        ("相手のセッションが一覧に出る", 相手のセッションが一覧に出る),
-        ("ターミナルから送ると相手のセッションに枠つきで届く", ターミナルから送ると相手のセッションに枠つきで届く),
+        ("the peer's session appears in the list", peer_session_appears_in_the_list),
+        ("sending from the terminal arrives framed in the peer's session", send_from_terminal_arrives_framed_in_peer_session),
         (
-            "clearで会話のidが変わっても_古い宛先に届き_送り主は今の名前になる",
-            clearで会話のidが変わっても_古い宛先に届き_送り主は今の名前になる,
+            "after /clear changes the conversation ID, the old address still delivers and the sender uses the current name",
+            after_clear_old_address_still_delivers_and_sender_uses_current_name,
         ),
-        ("いないセッション宛ては no_session", いないセッション宛てはno_session),
-        ("受信箱に届くと webhook で起こし、check_inbox 相当で読める", 受信箱に届くとwebhookで起こし_check_inbox相当で読める),
-        ("空の受信箱は --wait で届くまで待つ", 空の受信箱は_waitで届くまで待つ),
-        ("受信箱の名前で返事をすると、相手のセッションに届く", 受信箱の名前で返事をすると_相手のセッションに届く),
-        ("ターミナルからの送信への返事は terminal の受信箱に入る", ターミナルからの送信への返事はterminalの受信箱に入る),
-        ("MCP: NENWA_AS を付けたときだけ check_inbox が出る", mcp_nenwa_asを付けたときだけcheck_inboxが出る),
-        ("HTTP（nenwa muse）: 鍵なしと違う鍵は 401。鍵はハッシュだけ残す", http_muse_鍵なしと違う鍵は401_鍵はハッシュだけ残す),
-        ("HTTP: initialize と tools/list で 3 つのツール。通知は 202", http_initializeとtools_listで3つのツール_通知は202),
-        ("HTTP: muse からの send_message は、送り主が muse で届く", http_museからのsend_messageは_送り主がmuseで届く),
-        ("HTTP: 返事を check_inbox で読める", http_返事をcheck_inboxで読める),
-        ("HTTP: 本文が大きすぎると 413、続けて送ると 429", http_本文が大きすぎると413_続けて送ると429),
-        ("HTTP: 鍵の合わない要求が続くと 503", http_鍵の合わない要求が続くと503),
-        ("HTTP: --off のあとは使えない。受信箱の中身は残る", http_offのあとは使えない_受信箱の中身は残る),
-        ("HTTP: 期限を過ぎると閉じる", http_期限を過ぎると閉じる),
-        ("HTTP: デーモンが再起動しても開き直す", http_デーモンが再起動しても開き直す),
-        ("Cursor: sessionStart で宛先が決まり、postToolUse と stop で届く", cursor_session_startで宛先が決まり_post_tool_useとstopで届く),
+        ("sending to a session that is not there gives no_session", missing_session_gives_no_session),
         (
-            "Cursor: MCP（--agent cursor）から送ると、そのセッションが送り主になる",
-            cursor_mcp_agent_cursorから送ると_そのセッションが送り主になる,
+            "an arrival in an inbox wakes by webhook and can be read as with check_inbox",
+            inbox_arrival_wakes_by_webhook_and_reads_like_check_inbox,
         ),
-        ("Codex: codex queue で会話に入れる。失敗したらフックで差し込む", codex_codex_queueで会話に入れる_失敗したらフックで差し込む),
+        ("an empty inbox waits with --wait until a message arrives", empty_inbox_waits_with_wait_until_arrival),
+        ("a reply under the inbox name reaches the peer's session", reply_under_inbox_name_reaches_peer_session),
+        ("a reply to a message sent from the terminal goes to the terminal inbox", reply_to_terminal_send_goes_to_terminal_inbox),
+        ("MCP: check_inbox appears only with NENWA_AS", mcp_check_inbox_appears_only_with_nenwa_as),
         (
-            "Codex: 同じフォルダの会話が 2 つあっても、送り主は呼んだ本体で決まる。本体が消えた会話は一覧から外れる",
-            同じフォルダの会話が2つあっても_送り主は呼んだ本体で決まり_本体が消えた会話は一覧から外れる,
+            "HTTP (nenwa muse): no key or a wrong key gives 401. Only the hash of the key is stored",
+            http_muse_no_key_or_wrong_key_gives_401_and_only_the_hash_is_stored,
         ),
         (
-            "OpenCode: 手元のサーバーに送って会話に入れる。届かなければプラグインのフックで渡す",
-            opencode_手元のサーバーに送って会話に入れる_届かなければプラグインのフックで渡す,
+            "HTTP: initialize and tools/list give 3 tools. Notifications get 202",
+            http_initialize_and_tools_list_give_3_tools_and_notifications_get_202,
         ),
-        ("Pi: 拡張の待ち受けに、届いたらすぐ渡す", pi_拡張の待ち受けに_届いたらすぐ渡す),
-        ("Antigravity CLI: モデルを呼ぶ前と応答の終わりで届く", antigravity_cli_モデルを呼ぶ前と応答の終わりで届く),
-        ("Copilot CLI: フックで宛先が決まり、ツールのあとと応答の終わりで届く", copilot_cli_フックで宛先が決まり_ツールのあとと応答の終わりで届く),
+        ("HTTP: send_message from muse arrives with muse as the sender", http_send_message_from_muse_arrives_with_muse_as_sender),
+        ("HTTP: a reply can be read with check_inbox", http_reply_can_be_read_with_check_inbox),
+        ("HTTP: an oversized body gives 413, rapid requests give 429", http_oversized_body_gives_413_and_rapid_requests_give_429),
+        ("HTTP: repeated wrong-key requests give 503", http_repeated_wrong_key_requests_give_503),
+        ("HTTP: unusable after --off. Messages in the inbox are kept", http_unusable_after_off_and_inbox_messages_are_kept),
+        ("HTTP: closes after it expires", http_closes_after_expiry),
+        ("HTTP: reopens after the daemon restarts", http_reopens_after_daemon_restart),
         (
-            "Gemini CLI と Qwen Code: フックで宛先が決まり、それぞれの形で届く",
-            gemini_cliとqwen_code_フックで宛先が決まり_それぞれの形で届く,
+            "Cursor: sessionStart sets the address, postToolUse and stop deliver",
+            cursor_session_start_sets_address_and_post_tool_use_and_stop_deliver,
         ),
-        ("フック: デーモンがなくても何も出さずに正常終了する", フック_デーモンがなくても何も出さずに正常終了する),
         (
-            "setup: 各エージェントにほかの設定を残したまま足し、--remove で元に戻す",
-            setup_codexとcursorにほかの設定を残したまま足し_removeで元に戻す,
+            "Cursor: sending through MCP (--agent cursor) makes that session the sender",
+            cursor_mcp_agent_cursor_send_makes_that_session_the_sender,
         ),
-        ("相手がオフラインなら outbox に置き、戻ったら届く", 相手がオフラインならoutboxに置き_戻ったら届く),
         (
-            "P2P オフ（install が最初に作る形）でも、このパソコンの中では届く。invite でオンになる",
-            p2pオフ_install_が最初に作る形_でも_このパソコンの中では届く_inviteでオンになる,
+            "Codex: codex queue puts it into the conversation. On failure the hooks inject it",
+            codex_queue_puts_into_conversation_and_hooks_inject_on_failure,
+        ),
+        (
+            "Codex: with two conversations in the same folder, the sender is decided by the calling process. A conversation whose process is gone leaves the list",
+            with_two_conversations_in_one_folder_sender_is_the_calling_process_and_dead_ones_leave_the_list,
+        ),
+        (
+            "OpenCode: sends to the local server to put it into the conversation. If that fails, the plugin's hooks hand it over",
+            opencode_sends_to_local_server_and_falls_back_to_plugin_hooks,
+        ),
+        ("Pi: the extension's wait call gets an arrival at once", pi_extension_wait_gets_arrivals_at_once),
+        (
+            "Antigravity CLI: delivers before the model is called and at the end of a response",
+            antigravity_cli_delivers_before_model_call_and_at_end_of_response,
+        ),
+        (
+            "Copilot CLI: the hooks set the address, and messages arrive after a tool and at the end of a response",
+            copilot_cli_hooks_set_address_and_deliver_after_tools_and_at_end_of_response,
+        ),
+        (
+            "Gemini CLI and Qwen Code: the hooks set the address, and messages arrive in each one's form",
+            gemini_cli_and_qwen_code_hooks_set_address_and_deliver_in_each_form,
+        ),
+        ("hook: exits normally without output even when there is no daemon", hook_exits_cleanly_without_output_when_no_daemon),
+        (
+            "setup: adds to each agent while keeping other settings, and --remove restores them",
+            setup_adds_while_keeping_other_settings_and_remove_restores,
+        ),
+        (
+            "when the peer is offline the message goes to the outbox and is delivered when it returns",
+            offline_peer_goes_to_outbox_and_delivers_on_return,
+        ),
+        (
+            "with P2P off (what install creates first) messages still arrive inside this computer. invite turns it on",
+            p2p_off_still_delivers_inside_this_computer_and_invite_turns_it_on,
         ),
     ];
-    // cargo test -- <文字列> で、名前にその文字列を含むものだけを動かす（--list などの旗は無視）
+    // cargo test -- <string> runs only the tests whose name contains that string (flags such as --list are ignored)
     let filter: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with('-')).collect();
     let selected: Vec<_> = tests.into_iter().filter(|(n, _)| filter.is_empty() || filter.iter().any(|f| n.contains(f.as_str()))).collect();
     println!("\nrunning {} tests", selected.len());
@@ -1284,7 +1315,7 @@ fn main() {
         }
     }
     if !failed.is_empty() {
-        eprintln!("ログは NENWA_TEST_KEEP=1 で {} に残せます", ctx.root.display());
+        eprintln!("Set NENWA_TEST_KEEP=1 to keep the logs in {}", ctx.root.display());
     }
     after(ctx);
     println!(

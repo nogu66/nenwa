@@ -1,8 +1,8 @@
-// パソコンの上でコマンドを起動できない相手（Muse など）のための、HTTP の MCP の入り口。デーモンの中で動く。
-// - streamable HTTP の形で POST /mcp を受ける。本文は JSON-RPC 1 件、返事は application/json で 1 件。SSE とセッション ID は使わない。
-// - 待ち受けは 127.0.0.1 だけ。外からは Tailscale Funnel を通ったものだけが届く（muse.rs）。
-// - Authorization: Bearer <鍵> で受信箱が決まる。鍵そのものは残さず、SHA-256 だけを http/keys.json に書く。
-// - 中身は stdio の MCP と同じ（mcp.rs の respond）。送り主はその受信箱に固定され、別の名前は名乗れない。
+// The HTTP MCP endpoint for peers that cannot start a command on this computer (Muse and so on). Runs inside the daemon.
+// - Takes POST /mcp in streamable HTTP form. The body is one JSON-RPC message, the reply is one application/json. SSE and session IDs are not used.
+// - Listens on 127.0.0.1 only. From outside, only what comes through Tailscale Funnel arrives (muse.rs).
+// - Authorization: Bearer <key> decides the inbox. The key itself is not kept; only its SHA-256 is written to http/keys.json.
+// - The content is the same as the stdio MCP (respond in mcp.rs). The sender is fixed to that inbox and cannot use another name.
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -31,10 +31,10 @@ use crate::state::{self, now_iso, now_ms, read_json};
 
 pub const DEFAULT_PORT: u16 = 8787;
 const MAX_BODY: usize = 64 * 1024;
-const PER_KEY_PER_MIN: usize = 30; // 1 つの鍵から 1 分に受ける数
-const FAILS_PER_MIN: usize = 60; // 鍵の合わない要求が全体で 1 分にこれを超えたら止める
+const PER_KEY_PER_MIN: usize = 30; // requests accepted from one key per minute
+const FAILS_PER_MIN: usize = 60; // stop when wrong-key requests exceed this per minute in total
 const LOCKOUT_MS: u64 = 10 * 60_000;
-const MAX_WAIT: u32 = 25; // check_inbox の待ち（Funnel や相手の HTTP が切れないうちに返す）
+const MAX_WAIT: u32 = 25; // check_inbox wait (returns before Funnel or the client's HTTP times out)
 const MAX_CONNS: usize = 64;
 
 pub fn dir() -> PathBuf {
@@ -47,13 +47,13 @@ fn enabled_file() -> PathBuf {
     dir().join("enabled")
 }
 
-// 開いていることの記録。デーモンが再起動したときも、これを見て開き直す。
+// The record that it is open. When the daemon restarts, it reopens from this.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Enabled {
     pub port: u16,
-    pub expires: Option<u64>, // この時刻（ミリ秒）を過ぎたら閉じる。None なら閉じない
+    pub expires: Option<u64>, // close after this time (milliseconds). None means never close
     #[serde(default)]
-    pub funnel: bool, // Tailscale Funnel を開いたか（閉じるときに一緒に閉じる）
+    pub funnel: bool, // whether Tailscale Funnel was opened (closed together when closing)
 }
 
 impl Enabled {
@@ -77,13 +77,13 @@ fn save_enabled(e: &Enabled) -> Result<()> {
     Ok(())
 }
 
-// 鍵と開いている記録を消す（受信箱の中身は残す）
+// Delete the key and the open record (messages in the inbox are kept)
 pub fn clear() {
     let _ = std::fs::remove_file(keys_file());
     let _ = std::fs::remove_file(enabled_file());
 }
 
-// ---- 鍵 ----
+// ---- Keys ----
 pub fn new_key() -> String {
     URL_SAFE_NO_PAD.encode(state::random_bytes::<32>())
 }
@@ -94,7 +94,7 @@ fn hash_key(key: &str) -> [u8; 32] {
     out
 }
 
-// 受信箱 1 つに鍵は 1 つ。作り直すと古い鍵は使えなくなる（デーモンが読み直したとき）。
+// One key per inbox. Making a new one disables the old key (when the daemon rereads).
 pub fn save_key(mailbox: &str, key: &str) -> Result<()> {
     let mut keys: Map<String, Value> = read_json(&keys_file()).unwrap_or_default();
     keys.insert(mailbox.into(), json!({ "sha256": state::hex(&hash_key(key)), "created": now_iso() }));
@@ -114,17 +114,17 @@ fn load_keys() -> Vec<([u8; 32], String)> {
         .collect()
 }
 
-// 途中で抜けずに最後まで比べる
+// Compare to the end without leaving early
 fn same(a: &[u8; 32], b: &[u8; 32]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-// ---- 入り口 ----
+// ---- Endpoint ----
 #[derive(Default)]
 struct Limits {
-    fails: VecDeque<u64>,                      // 鍵の合わなかった要求の時刻（直近 1 分）
-    locked_until: u64,                         // この時刻まではすべて 503
-    per_key: HashMap<[u8; 32], VecDeque<u64>>, // 鍵 → 直近 1 分の要求の時刻
+    fails: VecDeque<u64>,                      // times of wrong-key requests (last minute)
+    locked_until: u64,                         // everything gets 503 until this time
+    per_key: HashMap<[u8; 32], VecDeque<u64>>, // key → request times in the last minute
 }
 
 struct Gate {
@@ -149,8 +149,8 @@ fn json_res(status: StatusCode, v: &Value) -> Res {
     r
 }
 
-// 断るときも、小さい本文は読み捨ててから返す。
-// 読み残したまま接続を閉じると、Windows では相手に強制切断（10053）が伝わり、応答が届かないことがある。
+// Even when refusing, read and discard a small body before replying.
+// If the connection is closed with data unread, Windows sends the client a forced disconnect (10053), and the response may not arrive.
 async fn reject(req: Request<Incoming>, res: Res) -> Res {
     let declared = req.headers().get(CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok());
     if declared.is_none_or(|n| n <= MAX_BODY as u64) {
@@ -177,7 +177,7 @@ impl Gate {
         if l.fails.len() > FAILS_PER_MIN {
             l.locked_until = now + LOCKOUT_MS;
             l.fails.clear();
-            log!("http: 鍵の合わない要求が多いので 10 分止めます");
+            log!("http: too many wrong-key requests, stopping for 10 minutes");
         }
     }
 
@@ -194,7 +194,7 @@ impl Gate {
         true
     }
 
-    // 鍵から受信箱の名前。すべての鍵と比べる。
+    // From the key to the inbox name. Compare against every key.
     fn mailbox(&self, req: &Request<Incoming>) -> Option<([u8; 32], String)> {
         let auth = req.headers().get(AUTHORIZATION)?.to_str().ok()?.trim();
         let (scheme, token) = auth.split_once(' ')?;
@@ -255,13 +255,13 @@ impl Gate {
             let err = json!({ "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "Invalid Request" } });
             return json_res(StatusCode::BAD_REQUEST, &err);
         }
-        // 通知と、こちらへの返事（method がない）は受け取るだけ
+        // Notifications, and replies to us (no method), are only accepted
         if msg.get("method").is_none() || msg.get("id").is_none() {
             let mut r = Response::new(Full::new(Bytes::new()));
             *r.status_mut() = StatusCode::ACCEPTED;
             return r;
         }
-        // 中ではデーモンに手元の通信で聞く（待つことがあるので別のスレッドで）
+        // Inside, ask the daemon over the local socket (on another thread, because it may wait)
         let server = Server { as_: name, agent: String::new(), max_wait: MAX_WAIT };
         match tokio::task::spawn_blocking(move || server.respond(&msg)).await {
             Ok(Some(res)) => json_res(StatusCode::OK, &res),
@@ -275,7 +275,7 @@ impl Gate {
     }
 }
 
-// 開いている入り口。止めると待ち受けも、つながっている分もすべて閉じる。
+// The open endpoint. Stopping it closes the listener and every open connection.
 pub struct Running {
     pub enabled: Enabled,
     task: tokio::task::JoinHandle<()>,
@@ -290,11 +290,11 @@ impl Running {
 
 pub async fn start(e: &Enabled) -> Result<Running> {
     let listener =
-        TcpListener::bind(("127.0.0.1", e.port)).await.map_err(|err| anyhow!("127.0.0.1:{} で待ち受けられません（{err}）", e.port))?;
+        TcpListener::bind(("127.0.0.1", e.port)).await.map_err(|err| anyhow!("Cannot listen on 127.0.0.1:{} ({err})", e.port))?;
     save_enabled(e)?;
     let gate = Arc::new(Gate { keys: load_keys(), expires: e.expires, limits: Mutex::new(Limits::default()) });
     let task = tokio::spawn(async move {
-        // つながりはこの中で持つ。この task が止まると、すべて閉じる。
+        // Connections are held in here. When this task stops, they all close.
         let mut conns = JoinSet::new();
         loop {
             tokio::select! {
@@ -331,7 +331,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 鍵は32バイトで_ハッシュで比べる() {
+    fn key_is_32_bytes_and_compared_by_hash() {
         let k = new_key();
         assert_eq!(URL_SAFE_NO_PAD.decode(&k).unwrap().len(), 32);
         assert_ne!(k, new_key());

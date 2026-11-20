@@ -1,11 +1,11 @@
-// P2P（iroh）。
-// - 身元: パソコンごとに iroh の Endpoint を 1 つ持つ。秘密鍵は config.json の seed から作るので、身元は変わらない。
-// - 招待: チーム鍵と、招いた側の住所（公開鍵、relay、LAN の住所）を合わせて base64url にしたもの。
-// - つなぎ方: つないだら HMAC の hello で合言葉を確かめ、互いの知っている仲間の住所を交換して、知らない仲間にもつなぐ。
-//   仲間の一覧は peers.json に残し、起動のたびにつなぎ直す。
-// - 回線の中身: 1 行 1 JSON（hello、presence、msg、ack、peers）を、1 本の双方向ストリームに流す。
-// - 相手探し: iroh の標準（n0 の DNS と relay、ホールパンチ）。NENWA_RELAY=disabled なら relay も DNS も使わず、
-//   招待と peers.json にある LAN の住所だけでつなぐ（テスト用）。
+// P2P (iroh).
+// - Identity: each computer has one iroh Endpoint. The secret key is derived from the seed in config.json, so the identity does not change.
+// - Invite: the team key and the inviter's address (public key, relay, LAN addresses) combined as base64url.
+// - Connecting: after connecting, check the shared secret with an HMAC hello, exchange the addresses of known peers, and connect to unknown peers too.
+//   The peer list is kept in peers.json and reconnected on every start.
+// - On the wire: one JSON per line (hello, presence, msg, ack, peers), over a single bidirectional stream.
+// - Discovery: iroh's defaults (n0's DNS and relays, hole punching). With NENWA_RELAY=disabled neither relays nor DNS are used,
+//   and it connects only with the LAN addresses in the invite and peers.json (for tests).
 use anyhow::Result;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -28,7 +28,7 @@ use crate::state::{self, hex, now_ms, read_json, unhex, write_json_private};
 pub const ALPN: &[u8] = b"nenwa/1";
 const MAX_LINE: u64 = 256 * 1024;
 
-// 相手の住所
+// A peer's address
 #[derive(Serialize, Deserialize, Clone, Default, Debug, PartialEq)]
 pub struct PeerAddr {
     pub id: String,
@@ -38,7 +38,7 @@ pub struct PeerAddr {
     pub addrs: Vec<String>,
 }
 
-// peers.json の 1 件（鍵 hex → これ）
+// One peers.json entry (key hex → this)
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct Known {
     #[serde(default)]
@@ -92,7 +92,7 @@ fn to_endpoint_addr(p: &PeerAddr) -> Option<EndpointAddr> {
     Some(EndpointAddr::from_parts(PublicKey::from_bytes(&id).ok()?, addrs))
 }
 
-// 招待に入れる自分の住所。relay を使うときは relay につながるまで少し待つ。
+// Own address to put into an invite. When relays are used, wait a little until connected to one.
 pub async fn my_addr(ep: &Endpoint) -> PeerAddr {
     if !relay_disabled() {
         let _ = tokio::time::timeout(Duration::from_secs(5), ep.online()).await;
@@ -107,8 +107,8 @@ pub async fn my_addr(ep: &Endpoint) -> PeerAddr {
     to_peer_addr(&ep.addr())
 }
 
-// ---- 招待の文字列 ----
-// [チーム鍵 32][公開鍵 32][relay の長さ 1][relay][住所の数 1][住所: 4 か 6、IP、ポート 2]...
+// ---- Invite string ----
+// [team key 32][public key 32][relay length 1][relay][address count 1][address: 4 or 6, IP, port 2]...
 pub fn encode_invite(team_key: &[u8; 32], a: &PeerAddr) -> String {
     let mut b = team_key.to_vec();
     b.extend(unhex(&a.id).unwrap_or_default());
@@ -160,10 +160,10 @@ pub fn decode_invite(code: &str) -> Option<([u8; 32], PeerAddr)> {
     Some((key, PeerAddr { id, relay, addrs }))
 }
 
-// ---- 合言葉 ----
-// 送る側は (自分の鍵, 相手の鍵)、受ける側は (相手の鍵, 自分の鍵) で同じ値になる。チーム鍵を知らないと作れない。
+// ---- Shared secret ----
+// The sender uses (own key, peer key) and the receiver (peer key, own key), giving the same value. It cannot be made without the team key.
 fn hello_hmac(team_key: &[u8], from: &[u8], to: &[u8]) -> Hmac<Sha256> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(team_key).expect("HMAC は鍵の長さを選ばない");
+    let mut mac = Hmac::<Sha256>::new_from_slice(team_key).expect("HMAC accepts a key of any length");
     mac.update(b"nenwa/hello/");
     mac.update(from);
     mac.update(to);
@@ -181,7 +181,7 @@ pub fn verify_hello(team_key: &[u8], mac: &Value, remote: &[u8], local: &[u8]) -
     hello_hmac(team_key, remote, local).verify_slice(&unhex(m).unwrap_or_default()).is_ok()
 }
 
-// ---- つなぐ ----
+// ---- Connecting ----
 pub fn start(d: &Arc<Daemon>) {
     let Some(ep) = d.ep.get().cloned() else { return };
     let dd = d.clone();
@@ -195,7 +195,7 @@ pub fn start(d: &Arc<Daemon>) {
             });
         }
     });
-    // peers.json の仲間に、起動したときと、その後も 10 秒ごとにつなぎ直す。
+    // Reconnect to the peers in peers.json at startup and every 10 seconds after that.
     let dd = d.clone();
     tokio::spawn(async move {
         loop {
@@ -234,7 +234,7 @@ fn dial(d: &Arc<Daemon>, a: PeerAddr) {
     });
 }
 
-// 仲間から教わった住所のうち、まだつながっていない相手にかける
+// Of the addresses learned from peers, dial those not connected yet
 pub fn on_peers(d: &Arc<Daemon>, list: &Value) {
     for a in list.as_array().into_iter().flatten().take(100) {
         if let Ok(a) = serde_json::from_value::<PeerAddr>(a.clone()) {
@@ -253,7 +253,7 @@ async fn serve_conn(d: &Arc<Daemon>, conn: &Connection, remote: &str, dialer: bo
     let Some(ep) = d.ep.get() else { return };
     let (local_id, remote_id) = (*ep.id().as_bytes(), *conn.remote_id().as_bytes());
     let local = hex(&local_id);
-    // かけた側がストリームを開き、先に hello を書く（書くまで相手にはストリームが見えない）
+    // The dialing side opens the stream and writes hello first (the stream is not visible to the other side until something is written)
     let streams = if dialer {
         tokio::time::timeout(Duration::from_secs(10), conn.open_bi()).await
     } else {
@@ -355,8 +355,8 @@ async fn serve_conn(d: &Arc<Daemon>, conn: &Connection, remote: &str, dialer: bo
     }
 }
 
-// 同じ相手とのつながりが 2 本できたとき、古いほうを残すか。
-// 両側から同時にかけたときは、鍵の小さい側がかけたつながりを両側で残す。同じ側がかけ直したなら新しいほう。
+// When two connections to the same peer exist, whether to keep the old one.
+// When both sides dialed at once, both keep the connection dialed by the side with the smaller key. If the same side dialed again, the new one.
 fn keep_old(old_dialer: &str, new_dialer: &str) -> bool {
     old_dialer != new_dialer && old_dialer < new_dialer
 }
@@ -369,7 +369,7 @@ fn state_str(v: &Value) -> String {
     }
 }
 
-// 1 行読んで JSON にする。切れた、長すぎる、JSON でないときは None（つながりを切る）
+// Read one line and parse it as JSON. None if disconnected, too long, or not JSON (the connection is dropped)
 async fn read_line<R: tokio::io::AsyncRead + Unpin>(r: &mut BufReader<R>) -> Option<Value> {
     let mut line = String::new();
     loop {
@@ -389,26 +389,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 合言葉hmacの確認() {
+    fn hello_hmac_check() {
         let team: [u8; 32] = state::random_bytes();
         let (a, b): ([u8; 32], [u8; 32]) = (state::random_bytes(), state::random_bytes());
         let good = json!(hello_mac(&team, &a, &b));
         assert!(verify_hello(&team, &good, &a, &b));
-        assert!(!verify_hello(&state::random_bytes::<32>(), &good, &a, &b), "別のチーム鍵");
-        assert!(!verify_hello(&team, &good, &b, &a), "向きが逆");
+        assert!(!verify_hello(&state::random_bytes::<32>(), &good, &a, &b), "a different team key");
+        assert!(!verify_hello(&team, &good, &b, &a), "reversed direction");
         assert!(!verify_hello(&team, &json!("zz"), &a, &b));
     }
 
     #[test]
-    fn 同時にかけたときに残すつながり() {
-        // a < b。両側で同じ答え（a がかけたほう）になる
-        assert!(keep_old("a", "b"), "a がかけたのを持っていて b のが来た: 古いのを残す");
-        assert!(!keep_old("b", "a"), "b がかけたのを持っていて a のが来た: 新しいのにする");
-        assert!(!keep_old("a", "a"), "同じ側のかけ直しは新しいほう");
+    fn connection_kept_when_both_dial() {
+        // a < b. Both sides get the same answer (the one a dialed)
+        assert!(keep_old("a", "b"), "holding the one a dialed and b's arrives: keep the old one");
+        assert!(!keep_old("b", "a"), "holding the one b dialed and a's arrives: take the new one");
+        assert!(!keep_old("a", "a"), "a redial from the same side takes the new one");
     }
 
     #[test]
-    fn 招待の文字列() {
+    fn invite_string() {
         let key: [u8; 32] = state::random_bytes();
         let a = PeerAddr {
             id: hex(&state::random_bytes::<32>()),

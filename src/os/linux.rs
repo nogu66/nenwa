@@ -1,5 +1,4 @@
-// Linux: 自動起動は systemd --user の service。親プロセスは /proc で調べる。
-// （進め方の 2 で実機と Actions で確かめる）
+// Linux: autostart is a systemd --user service. Parent processes are looked up in /proc.
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -16,24 +15,24 @@ fn systemctl(args: &[&str]) -> bool {
 
 pub fn parent_pid(pid: i64) -> Option<i64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // 2 つ目の項目（名前）には空白が入りうるので、最後の ) のあとから数える
+    // The second field (the name) can contain spaces, so count from after the last )
     stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
 }
 
-// 落ちたときだけ起こし直す（2 つ目のデーモンは正常に終わるので、繰り返し起動されない）
+// Restart only after a crash (a second daemon exits normally, so it is not started over and over)
 fn unit_text(exe: &Path, nenwa_home: &Path, log: &Path) -> String {
     format!(
         "[Unit]\nDescription=nenwa daemon\n\n[Service]\nExecStart=\"{}\" daemon\nEnvironment=\"NENWA_HOME={}\"\nEnvironment=\"PATH={}\"\nRestart=on-failure\nStandardOutput=append:{}\nStandardError=append:{}\n\n[Install]\nWantedBy=default.target\n",
         exe.display(),
         nenwa_home.display(),
-        // systemd --user の PATH は最小限なので、codex などが見つかるよう登録したときの PATH を渡す（% は systemd の指定子なので重ねる）
+        // The systemd --user PATH is minimal, so pass the PATH from registration time so that codex and others are found (% is a systemd specifier, so it is doubled)
         std::env::var("PATH").unwrap_or_default().replace('%', "%%").replace('"', ""),
         log.display(),
         log.display()
     )
 }
 
-// 書いてある状態フォルダが今のものと同じか（テストや別の NENWA_HOME で本物のデーモンを起こし直さない）
+// Whether the state folder written there is the current one (do not restart the real daemon from tests or another NENWA_HOME)
 fn same_home(unit: &str, nenwa_home: &Path) -> bool {
     unit.lines().any(|l| l == format!("Environment=\"NENWA_HOME={}\"", nenwa_home.display()))
 }
@@ -45,7 +44,7 @@ pub fn autostart_install(exe: &Path, nenwa_home: &Path, log: &Path) -> anyhow::R
     std::fs::write(&file, text)?;
     systemctl(&["daemon-reload"]);
     if !systemctl(&["enable", "--now", UNIT]) {
-        anyhow::bail!("systemctl --user enable に失敗しました");
+        anyhow::bail!("systemctl --user enable failed");
     }
     Ok(file.to_string_lossy().into_owned())
 }
@@ -68,7 +67,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn systemdのユニット() {
+    fn systemd_unit() {
         let t = unit_text(Path::new("/home/a/.local/bin/nenwa"), Path::new("/home/a/.nenwa"), Path::new("/home/a/.nenwa/daemon.log"));
         assert!(t.contains("ExecStart=\"/home/a/.local/bin/nenwa\" daemon\n"));
         assert!(t.contains("StandardError=append:/home/a/.nenwa/daemon.log\n"));

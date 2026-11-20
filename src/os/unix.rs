@@ -1,4 +1,4 @@
-// Mac と Linux で同じところ。
+// What macOS and Linux share.
 use std::ffi::CStr;
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -9,7 +9,7 @@ pub fn home_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
 }
 
-// デーモンの手元の通信の場所
+// Where the daemon's local socket is
 pub fn sock_path(nenwa_home: &Path) -> PathBuf {
     nenwa_home.join("sock")
 }
@@ -18,7 +18,7 @@ pub fn alive(pid: i64) -> bool {
     if pid <= 0 || pid > i32::MAX as i64 {
         return false;
     }
-    // シグナル 0 は送らずに確かめるだけ。権限がないだけなら生きている。
+    // Signal 0 only checks without sending. If it is only a permission error, the process is alive.
     let ok = unsafe { libc::kill(pid as i32, 0) } == 0;
     ok || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
@@ -27,7 +27,7 @@ pub fn own_parent_pid() -> i64 {
     std::os::unix::process::parent_id() as i64
 }
 
-// フックのコマンドの囲み
+// Quoting of hook commands
 pub fn quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -52,7 +52,7 @@ pub fn host_name() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
-// 権限 600 で書く（作るときだけ効く。Node の writeFileSync の mode と同じ）
+// Write with mode 600 (applies only on creation. Same as mode in Node's writeFileSync)
 pub fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
     let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
     f.write_all(text.as_bytes())
@@ -68,13 +68,13 @@ pub fn set_private(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-// 裏で動かすプロセスを、呼んだ側の端末から切り離す
+// Detach a background process from the caller's terminal
 pub fn detach(cmd: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     cmd.process_group(0);
 }
 
-// SIGINT か SIGTERM が来るまで待つ
+// Wait until SIGINT or SIGTERM arrives
 pub async fn terminated() {
     use tokio::signal::unix::{SignalKind, signal};
     let (Ok(mut int), Ok(mut term)) = (signal(SignalKind::interrupt()), signal(SignalKind::terminate())) else {
@@ -86,7 +86,7 @@ pub async fn terminated() {
     }
 }
 
-// Claude Code のセッションの受信ソケットに 1 行書いて閉じる。相手が閉じるまで待つ。
+// Write one line to a Claude Code session's receiving socket and close. Wait until the other side closes.
 pub async fn post_line(socket_path: &str, line: &str) -> std::io::Result<()> {
     let mut c = tokio::net::UnixStream::connect(socket_path).await?;
     c.write_all(line.as_bytes()).await?;
@@ -96,7 +96,7 @@ pub async fn post_line(socket_path: &str, line: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-// 手元の通信の場所があるか（unix ソケットはファイルとして残る）
+// Whether the local socket exists (a unix socket stays as a file)
 pub fn sock_exists(path: &Path) -> bool {
     path.exists()
 }
@@ -105,12 +105,12 @@ pub fn remove_sock(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-// 動いている実行ファイルの場所
+// Where the running executable is
 pub fn exe_path() -> Option<PathBuf> {
     std::env::current_exe().ok()?.canonicalize().ok()
 }
 
-// shutdown を知らない古いデーモンは、ソケットを開いているプロセスに SIGTERM を送って止める。
+// An old daemon that does not know shutdown is stopped by sending SIGTERM to the processes holding the socket open.
 pub fn stop_socket_holders(sock: &Path) {
     let Ok(out) = std::process::Command::new("lsof").arg("-t").arg(sock).output() else { return };
     for pid in String::from_utf8_lossy(&out.stdout).split_whitespace() {
@@ -120,13 +120,13 @@ pub fn stop_socket_holders(sock: &Path) {
     }
 }
 
-// デーモンを始める前の準備（Mac と Linux は何もしない。ログは自動起動の設定で daemon.log に向く）
+// Preparation before the daemon starts (nothing on macOS and Linux. The autostart config points the log at daemon.log)
 pub fn prepare_daemon(_log: &Path) {}
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn 親プロセスの番号() {
+    fn parent_process_ids() {
         assert_eq!(super::super::parent_pid(std::process::id() as i64), Some(super::own_parent_pid()));
         assert!(super::alive(std::process::id() as i64));
         assert_eq!(super::quote("a'b"), "'a'\\''b'");
