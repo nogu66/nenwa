@@ -12,21 +12,21 @@ categories = ["command-line-utilities", "development-tools"]
 publish = false
 
 [dependencies]
-anyhow = "=1.0.104"
+anyhow = "=1.0.105"
 base64 = "=0.23.1"
 hmac = "=0.13.0"
 http-body-util = "=0.1.5"
 hyper = { version = "=1.12.0", features = ["http1", "server"] }
 hyper-util = { version = "=0.1.21", features = ["tokio"] }
-interprocess = { version = "=2.4.7", features = ["tokio"] }
-iroh = "=1.4.1"
-rand = "=0.10.3"
-rpassword = "=7.5.4"
+interprocess = { version = "=2.4.9", features = ["tokio"] }
+iroh = "=1.5.0"
+rand = "=0.10.4"
+rpassword = "=7.5.5"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 sha2 = "=0.11.1"
 tokio = { version = "=1.54.1", features = ["full"] }
-ureq = { version = "=3.5.1", default-features = false, features = ["rustls"] }
+ureq = { version = "=3.5.2", default-features = false, features = ["rustls"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "=0.2.191"
@@ -35,7 +35,7 @@ libc = "=0.2.191"
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Pipes", "Win32_System_Threading"] }
 
 [dev-dependencies]
-regex = "=1.13.1"
+regex = "=1.13.2"
 
 [[test]]
 name = "e2e"
